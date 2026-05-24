@@ -5,6 +5,7 @@ import { now } from './time.js'
 
 let client
 let database
+let bootstrapped = false
 
 export async function initDb() {
   if (database) return database
@@ -14,7 +15,7 @@ export async function initDb() {
 
   client = new MongoClient(MONGODB_URI, {
     maxPoolSize: 10,
-    serverSelectionTimeoutMS: 10000,
+    serverSelectionTimeoutMS: 5000,
   })
   await client.connect()
   database = client.db(DB_NAME)
@@ -39,6 +40,21 @@ export async function initDb() {
   ])
 
   return database
+}
+
+export async function ensureDbReady() {
+  await initDb()
+  if (!bootstrapped) {
+    await ensureInitialData()
+    bootstrapped = true
+  }
+  return database
+}
+
+export async function pingDb() {
+  const db = await initDb()
+  await db.command({ ping: 1 })
+  return true
 }
 
 export function col(name) {

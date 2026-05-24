@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import crypto from 'node:crypto'
 import { CLIENT_URL, GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI, PORT, QR_TTL_SECONDS } from './config.js'
-import { col, ensureInitialData, initDb, insertDoc, publicDoc, publicDocs } from './db.js'
+import { col, ensureDbReady, insertDoc, pingDb, publicDoc, publicDocs } from './db.js'
 import { authOptional, authRequired, authResponse, currentAuthPayload, exchangeGoogleCode, upsertGoogleUser } from './auth.js'
 import { csvCell, fail, ok } from './http.js'
 import { parseCsv } from './csv.js'
@@ -28,9 +28,6 @@ import {
   toDbStatus,
 } from './domain.js'
 
-await initDb()
-await ensureInitialData()
-
 const app = express()
 const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next)
 
@@ -46,13 +43,19 @@ app.use(cors({
 }))
 app.use(express.json())
 
-app.get('/api/health', (_req, res) => {
-  ok(res, { status: 'ok', db: 'mongodb', time: new Date().toISOString() })
+app.get('/', (_req, res) => {
+  ok(res, { service: 'Attendi API', db: 'mongodb', health: '/api/health', time: new Date().toISOString() })
 })
 
-app.get('/', (_req, res) => {
-  ok(res, { service: 'Attendi API', db: 'mongodb', health: '/api/health' })
-})
+app.get('/api/health', route(async (_req, res) => {
+  await pingDb()
+  ok(res, { status: 'ok', db: 'mongodb', time: new Date().toISOString() })
+}))
+
+app.use('/api', route(async (_req, _res, next) => {
+  await ensureDbReady()
+  next()
+}))
 
 app.get('/api/auth/google', (req, res) => {
   const role = req.query.role === 'teacher' ? 'teacher' : 'student'
