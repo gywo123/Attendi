@@ -10,6 +10,7 @@ const GOOGLE_CONFIG = loadGoogleConfig()
 
 export const PORT = Number(process.env.PORT || 4000)
 export const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173'
+export const CLIENT_URLS = splitUrls(process.env.CLIENT_URLS || CLIENT_URL)
 export const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret'
 export const MONGODB_URI = process.env.MONGODB_URI || ''
 export const DB_NAME = process.env.DB_NAME || 'attendi'
@@ -31,4 +32,11 @@ function loadGoogleConfig() {
   } catch {
     return null
   }
+}
+
+function splitUrls(value) {
+  return String(value || '')
+    .split(',')
+    .map((url) => url.trim().replace(/\/$/, ''))
+    .filter(Boolean)
 }

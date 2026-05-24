@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import crypto from 'node:crypto'
-import { CLIENT_URL, GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI, PORT, QR_TTL_SECONDS } from './config.js'
+import { CLIENT_URL, CLIENT_URLS, GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI, PORT, QR_TTL_SECONDS } from './config.js'
 import { col, ensureDbReady, insertDoc, pingDb, publicDoc, publicDocs } from './db.js'
 import { authOptional, authRequired, authResponse, currentAuthPayload, exchangeGoogleCode, upsertGoogleUser } from './auth.js'
 import { csvCell, fail, ok } from './http.js'
@@ -30,17 +30,24 @@ import {
 
 const app = express()
 const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next)
+const vercelPreviewOrigin = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i
+const localOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/
 
-app.use(cors({
+const corsMiddleware = cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true)
-    if (origin === CLIENT_URL || /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
+    const normalizedOrigin = origin.replace(/\/$/, '')
+    if (CLIENT_URLS.includes(normalizedOrigin) || localOrigin.test(origin) || vercelPreviewOrigin.test(origin)) {
       return callback(null, true)
     }
-    return callback(new Error(`CORS blocked origin: ${origin}`))
+    return callback(null, false)
   },
   credentials: true,
-}))
+  optionsSuccessStatus: 204,
+})
+
+app.use(corsMiddleware)
+app.options('*', corsMiddleware)
 app.use(express.json())
 
 app.get('/', (_req, res) => {
