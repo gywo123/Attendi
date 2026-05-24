@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+client_secret*.json
+Attendance Check Web App UI.zip
+
