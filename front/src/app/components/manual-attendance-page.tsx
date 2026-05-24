@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   CheckCircle2,
   Clock,
@@ -50,7 +50,6 @@ const STATUS_OPTIONS: {
 ]
 
 const DEFAULT_TIME = '09:00'
-const CLASSES = ['전체', '3-1', '3-2', '2-1', '2-2']
 
 type ApiStudent = {
   id: number
@@ -154,6 +153,17 @@ export function ManualAttendancePage() {
 
   const now = new Date()
   const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  const classOptions = useMemo(() => {
+    const classes = Array.from(new Set(records.map((record) => record.class).filter(Boolean)))
+      .sort((a, b) => a.localeCompare(b, 'ko-KR', { numeric: true }))
+    return ['전체', ...classes]
+  }, [records])
+
+  useEffect(() => {
+    if (!classOptions.includes(classFilter)) {
+      setClassFilter('전체')
+    }
+  }, [classFilter, classOptions])
 
   const filtered = records.filter((r) => {
     const matchClass = classFilter === '전체' || r.class === classFilter
@@ -282,7 +292,7 @@ export function ManualAttendancePage() {
             />
           </div>
           <div className="flex gap-1.5 overflow-x-auto">
-            {CLASSES.map((cls) => (
+            {classOptions.map((cls) => (
               <button
                 key={cls}
                 onClick={() => setClassFilter(cls)}

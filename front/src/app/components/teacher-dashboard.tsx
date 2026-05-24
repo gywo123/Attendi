@@ -51,7 +51,7 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string; 
   early: { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', bar: 'bg-blue-500', dot: 'bg-blue-500' },
 }
 
-type ApiClass = { id: number; name: string }
+type ApiStudentClass = { classId: number; className: string }
 
 type ApiSummary = {
   date: string
@@ -107,6 +107,19 @@ function timeOnly(value?: string) {
   return new Date(value).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
+function classOptionsFromStudents(students: ApiStudentClass[]) {
+  const seen = new Set<number>()
+  return students
+    .filter((student) => student.classId && student.className)
+    .filter((student) => {
+      if (seen.has(student.classId)) return false
+      seen.add(student.classId)
+      return true
+    })
+    .map((student) => ({ id: student.classId, name: student.className }))
+    .sort((a, b) => classShort(a.name).localeCompare(classShort(b.name), 'ko-KR', { numeric: true }))
+}
+
 export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }) {
   const [manualOpen, setManualOpen] = useState(false)
   const [date] = useState(todayString())
@@ -126,13 +139,17 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
       try {
         const params = new URLSearchParams({ date })
         if (selectedClassId) params.set('classId', String(selectedClassId))
-        const [classList, summary, weeklySummary] = await Promise.all([
-          apiFetch<ApiClass[]>('/classes'),
+        const [students, summary, weeklySummary] = await Promise.all([
+          apiFetch<ApiStudentClass[]>('/students'),
           apiFetch<ApiSummary>(`/attendance/summary?${params.toString()}`),
           apiFetch<ApiWeeklySummary>(`/attendance/weekly-summary?${params.toString()}`),
         ])
         if (ignore) return
-        setClasses(classList)
+        const nextClasses = classOptionsFromStudents(students)
+        setClasses(nextClasses)
+        if (selectedClassId && !nextClasses.some((cls) => cls.id === selectedClassId)) {
+          setSelectedClassId(null)
+        }
         setStats({
           total: summary.summary.total,
           present: summary.summary.present,
