@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import crypto from 'node:crypto'
 import { CLIENT_URL, GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI, PORT, QR_TTL_SECONDS } from './config.js'
-import { db, initDb, ensureInitialData, all, one, run } from './db.js'
+import { col, ensureInitialData, initDb, insertDoc, publicDoc, publicDocs } from './db.js'
 import { authOptional, authRequired, authResponse, currentAuthPayload, exchangeGoogleCode, upsertGoogleUser } from './auth.js'
 import { csvCell, fail, ok } from './http.js'
 import { parseCsv } from './csv.js'
@@ -28,7 +28,11 @@ import {
   toDbStatus,
 } from './domain.js'
 
+await initDb()
+await ensureInitialData()
+
 const app = express()
+const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next)
 
 app.use(cors({
   origin(origin, callback) {
@@ -42,15 +46,12 @@ app.use(cors({
 }))
 app.use(express.json())
 
-initDb()
-ensureInitialData()
-
 app.get('/api/health', (_req, res) => {
-  ok(res, { status: 'ok', time: new Date().toISOString() })
+  ok(res, { status: 'ok', db: 'mongodb', time: new Date().toISOString() })
 })
 
 app.get('/', (_req, res) => {
-  ok(res, { service: 'Attendi API', health: '/api/health' })
+  ok(res, { service: 'Attendi API', db: 'mongodb', health: '/api/health' })
 })
 
 app.get('/api/auth/google', (req, res) => {
@@ -73,14 +74,14 @@ app.get('/api/auth/google', (req, res) => {
   res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
 })
 
-app.get('/api/auth/google/callback', async (req, res) => {
+app.get('/api/auth/google/callback', route(async (req, res) => {
   const code = req.query.code
   const role = req.query.state === 'teacher' ? 'teacher' : 'student'
   if (!code) return res.redirect(`${CLIENT_URL}?auth_error=missing_code`)
 
   try {
     const googleUser = await exchangeGoogleCode(String(code))
-    const result = upsertGoogleUser({ role, googleUser })
+    const result = await upsertGoogleUser({ role, googleUser })
     if (result.pendingApproval) {
       return res.redirect(`${CLIENT_URL}?signup_pending=${encodeClientPayload(result.pendingApproval)}`)
     }
@@ -92,19 +93,19 @@ app.get('/api/auth/google/callback', async (req, res) => {
     console.error(error)
     res.redirect(`${CLIENT_URL}?auth_error=google_oauth_failed`)
   }
-})
+}))
 
-app.get('/api/auth/me', authRequired([]), (req, res) => {
-  ok(res, currentAuthPayload(req.user))
-})
+app.get('/api/auth/me', authRequired([]), route(async (req, res) => {
+  ok(res, await currentAuthPayload(req.user))
+}))
 
-app.post('/api/auth/teacher/login', (req, res) => {
+app.post('/api/auth/teacher/login', route(async (req, res) => {
   const { email, password, passwordHash } = req.body || {}
   const input = password || passwordHash
   if (!email || !input) return fail(res, 400, 'BAD_REQUEST', '이메일과 비밀번호를 입력해 주세요.')
 
-  const teacher = one('SELECT * FROM teachers WHERE email = ?', [email])
-  if (!teacher || !verifyPassword(input, teacher.password_hash)) {
+  const teacher = publicDoc(await col('teachers').findOne({ email: String(email) }))
+  if (!teacher || !verifyPassword(input, teacher.passwordHash)) {
     return fail(res, 401, 'UNAUTHORIZED', '이메일 또는 비밀번호가 올바르지 않습니다.')
   }
   if (teacher.status === 'pending') {
@@ -114,117 +115,102 @@ app.post('/api/auth/teacher/login', (req, res) => {
     return fail(res, 403, 'TEACHER_INACTIVE', '비활성화된 교사 계정입니다.')
   }
 
-  ok(res, authResponse({
+  ok(res, await authResponse({
     id: teacher.id,
     role: teacher.role,
     name: teacher.name,
     email: teacher.email,
   }))
-})
+}))
 
-app.post('/api/auth/teacher/signup', (req, res) => {
+app.post('/api/auth/teacher/signup', route(async (req, res) => {
   const { name, email, password, school = '학교', subject = '' } = req.body || {}
   if (!name || !email || !password) {
     return fail(res, 400, 'BAD_REQUEST', '이름, 이메일, 비밀번호를 입력해 주세요.')
   }
 
   try {
-    run(
-      `INSERT INTO teachers (name, email, role, password_hash, school, subject, status, created_at)
-       VALUES (?, ?, 'teacher', ?, ?, ?, 'pending', ?)`,
-      [String(name), String(email), hashPassword(String(password)), String(school), String(subject), now()],
-    )
-    ok(res, {
-      id: db.prepare('SELECT last_insert_rowid() AS id').get().id,
-      name,
-      email,
+    const teacher = await insertDoc('teachers', {
+      name: String(name),
+      email: String(email),
+      role: 'teacher',
+      passwordHash: hashPassword(String(password)),
+      school: String(school),
+      subject: String(subject),
       status: 'pending',
+      createdAt: now(),
     })
+    ok(res, { id: teacher.id, name, email, status: 'pending' })
   } catch (error) {
-    if (String(error.message).includes('UNIQUE')) {
-      return fail(res, 409, 'DUPLICATE_TEACHER_EMAIL', '이미 등록된 교사 이메일입니다.')
-    }
+    if (isDuplicate(error)) return fail(res, 409, 'DUPLICATE_TEACHER_EMAIL', '이미 등록된 교사 이메일입니다.')
     throw error
   }
-})
+}))
 
-app.post('/api/auth/student/signup', (req, res) => {
+app.post('/api/auth/student/signup', route(async (req, res) => {
   const { name, email } = req.body || {}
   if (!name || !email) return fail(res, 400, 'BAD_REQUEST', '이름과 이메일을 입력해 주세요.')
 
-  const activeStudent = one('SELECT id FROM students WHERE email = ? AND is_active = 1', [String(email)])
+  const activeStudent = await col('students').findOne({ email: String(email), isActive: true })
   if (activeStudent) return fail(res, 409, 'STUDENT_ALREADY_APPROVED', '이미 승인된 학생 계정입니다.')
 
-  const pending = one(
-    "SELECT id FROM student_applications WHERE email = ? AND status = 'pending' ORDER BY requested_at DESC, id DESC LIMIT 1",
-    [String(email)],
-  )
+  const pending = await col('studentApplications').findOne({ email: String(email), status: 'pending' })
   if (!pending) {
-    run(
-      "INSERT INTO student_applications (name, email, status, requested_at) VALUES (?, ?, 'pending', ?)",
-      [String(name), String(email), now()],
-    )
+    await insertDoc('studentApplications', {
+      name: String(name),
+      email: String(email),
+      status: 'pending',
+      requestedAt: now(),
+    })
   }
   ok(res, { name, email, role: 'student', status: 'pending' })
-})
+}))
 
-app.post('/api/device/login', (req, res) => {
+app.post('/api/device/login', route(async (req, res) => {
   const { token, deviceName } = req.body || {}
   if (!token) return fail(res, 400, 'BAD_REQUEST', '기기 토큰을 입력해 주세요.')
 
-  const device = one('SELECT * FROM device_tokens WHERE token = ? AND revoked_at IS NULL', [token])
+  const device = publicDoc(await col('deviceTokens').findOne({ token: String(token), revokedAt: null }))
   if (!device) return fail(res, 401, 'UNAUTHORIZED', '유효하지 않은 기기 토큰입니다.')
 
-  run(
-    'UPDATE device_tokens SET device_name = COALESCE(?, device_name), last_used_at = ? WHERE id = ?',
-    [deviceName || null, now(), device.id],
+  await col('deviceTokens').updateOne(
+    { id: device.id },
+    { $set: { deviceName: deviceName || device.deviceName, lastUsedAt: now() } },
   )
 
-  ok(res, authResponse({
+  ok(res, await authResponse({
     id: device.id,
     role: 'device',
-    name: deviceName || device.device_name || '출석 인식기',
-    deviceName: deviceName || device.device_name || '출석 인식기',
+    name: deviceName || device.deviceName || '출석 인식기',
+    deviceName: deviceName || device.deviceName || '출석 인식기',
     email: '',
   }))
-})
+}))
 
-app.get('/api/classes', authOptional, (_req, res) => {
-  ok(res, all('SELECT id, name, school_location_id AS schoolLocationId, created_at AS createdAt FROM classes ORDER BY id'))
-})
+app.get('/api/classes', authOptional, route(async (_req, res) => {
+  ok(res, publicDocs(await col('classes').find().sort({ id: 1 }).toArray()))
+}))
 
-app.get('/api/students', authOptional, (req, res) => {
+app.get('/api/students', authOptional, route(async (req, res) => {
   const { classId, keyword, includeInactive } = req.query
-  const clauses = includeInactive === 'true' ? ['1 = 1'] : ['s.is_active = 1']
-  const params = []
-  if (classId) {
-    clauses.push('s.class_id = ?')
-    params.push(Number(classId))
-  }
+  const filter = includeInactive === 'true' ? {} : { isActive: true }
+  if (classId) filter.classId = Number(classId)
   if (keyword) {
-    clauses.push('(s.name LIKE ? OR s.student_number LIKE ?)')
-    params.push(`%${keyword}%`, `%${keyword}%`)
+    filter.$or = [
+      { name: { $regex: escapeRegex(keyword), $options: 'i' } },
+      { studentNumber: { $regex: escapeRegex(keyword), $options: 'i' } },
+    ]
   }
 
-  ok(res, all(`
-    SELECT s.id, s.class_id AS classId, s.student_number AS studentNumber, s.name, s.email, s.is_active AS isActive,
-           c.name AS className
-    FROM students s
-    JOIN classes c ON c.id = s.class_id
-    WHERE ${clauses.join(' AND ')}
-    ORDER BY c.id, s.student_number
-  `, params))
-})
+  const students = publicDocs(await col('students').find(filter).sort({ classId: 1, studentNumber: 1 }).toArray())
+  ok(res, await Promise.all(students.map(withClassName)))
+}))
 
-app.get('/api/students/export.csv', authRequired(['teacher', 'admin']), (req, res) => {
+app.get('/api/students/export.csv', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const includeInactive = req.query.includeInactive === 'true'
-  const rows = all(`
-    SELECT s.name, s.student_number AS studentNumber, s.email, s.is_active AS isActive, c.name AS className
-    FROM students s
-    JOIN classes c ON c.id = s.class_id
-    WHERE ${includeInactive ? '1 = 1' : 's.is_active = 1'}
-    ORDER BY c.id, s.student_number
-  `)
+  const filter = includeInactive ? {} : { isActive: true }
+  const students = publicDocs(await col('students').find(filter).sort({ classId: 1, studentNumber: 1 }).toArray())
+  const rows = await Promise.all(students.map(withClassName))
   const csv = [
     ['name', 'studentNumber', 'className', 'email', 'isActive'],
     ...rows.map((row) => [row.name, row.studentNumber, row.className, row.email || '', row.isActive ? 'true' : 'false']),
@@ -232,9 +218,9 @@ app.get('/api/students/export.csv', authRequired(['teacher', 'admin']), (req, re
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
   res.setHeader('Content-Disposition', 'attachment; filename="students.csv"')
   res.send(`\uFEFF${csv}`)
-})
+}))
 
-app.post('/api/students/import', authRequired(['teacher', 'admin']), (req, res) => {
+app.post('/api/students/import', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const rows = Array.isArray(req.body?.students)
     ? req.body.students
     : parseCsv(String(req.body?.csv || ''))
@@ -252,103 +238,101 @@ app.post('/api/students/import', authRequired(['teacher', 'admin']), (req, res) 
       continue
     }
     try {
-      const classId = resolveClassId({ className })
-      const existing = one('SELECT id FROM students WHERE student_number = ?', [String(studentNumber)])
+      const classId = await resolveClassId({ className })
+      const existing = await col('students').findOne({ studentNumber: String(studentNumber) })
       if (existing) {
-        run(
-          'UPDATE students SET name = ?, class_id = ?, email = ?, is_active = ? WHERE id = ?',
-          [String(name), classId, String(email), isActive ? 1 : 0, existing.id],
+        await col('students').updateOne(
+          { id: existing.id },
+          { $set: { name: String(name), classId, email: String(email), isActive } },
         )
-        imported.push(getStudentById(existing.id))
+        imported.push(await getStudentById(existing.id))
       } else {
-        run(
-          'INSERT INTO students (class_id, student_number, name, email, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-          [classId, String(studentNumber), String(name), String(email), isActive ? 1 : 0, now()],
-        )
-        imported.push(getStudentById(db.prepare('SELECT last_insert_rowid() AS id').get().id))
+        const student = await insertDoc('students', {
+          classId,
+          studentNumber: String(studentNumber),
+          name: String(name),
+          email: String(email),
+          isActive,
+          createdAt: now(),
+        })
+        imported.push(await getStudentById(student.id))
       }
     } catch (error) {
-      skipped.push({ row, reason: error.message })
+      skipped.push({ row, reason: duplicateMessage(error, error.message) })
     }
   }
 
   ok(res, { importedCount: imported.length, skippedCount: skipped.length, students: imported, skipped })
-})
+}))
 
-app.post('/api/students', authRequired(['teacher', 'admin']), (req, res) => {
+app.post('/api/students', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const { name, studentNumber, email = '', classId, className, grade, classNum, isActive = true } = req.body || {}
   if (!name || !studentNumber) return fail(res, 400, 'BAD_REQUEST', '이름과 학번을 입력해 주세요.')
 
-  const resolvedClassId = resolveClassId({ classId, className, grade, classNum })
+  const resolvedClassId = await resolveClassId({ classId, className, grade, classNum })
   try {
-    run(
-      `INSERT INTO students (class_id, student_number, name, email, is_active, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [resolvedClassId, String(studentNumber), String(name), String(email), isActive ? 1 : 0, now()],
-    )
-    ok(res, getStudentById(db.prepare('SELECT last_insert_rowid() AS id').get().id))
+    const student = await insertDoc('students', {
+      classId: resolvedClassId,
+      studentNumber: String(studentNumber),
+      name: String(name),
+      email: String(email),
+      isActive: Boolean(isActive),
+      createdAt: now(),
+    })
+    ok(res, await getStudentById(student.id))
   } catch (error) {
-    if (String(error.message).includes('UNIQUE')) {
-      return fail(res, 409, 'DUPLICATE_STUDENT_NUMBER', '이미 등록된 학번입니다.')
-    }
+    if (isDuplicate(error)) return fail(res, 409, 'DUPLICATE_STUDENT_NUMBER', '이미 등록된 학번입니다.')
     throw error
   }
-})
+}))
 
-app.patch('/api/students/:id', authRequired(['teacher', 'admin']), (req, res) => {
-  const student = getStudentById(req.params.id)
+app.patch('/api/students/:id', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const student = await getStudentById(req.params.id)
   if (!student) return fail(res, 404, 'NOT_FOUND', '학생을 찾을 수 없습니다.')
 
   const { name, studentNumber, email, classId, className, grade, classNum, isActive } = req.body || {}
   const resolvedClassId = classId || className || grade || classNum
-    ? resolveClassId({ classId, className, grade, classNum })
+    ? await resolveClassId({ classId, className, grade, classNum })
     : student.classId
 
   try {
-    run(
-      `UPDATE students
-       SET class_id = ?, student_number = ?, name = ?, email = ?, is_active = ?
-       WHERE id = ?`,
-      [
-        resolvedClassId,
-        String(studentNumber ?? student.studentNumber),
-        String(name ?? student.name),
-        String(email ?? student.email ?? ''),
-        isActive === undefined ? Number(student.isActive) : isActive ? 1 : 0,
-        student.id,
-      ],
+    await col('students').updateOne(
+      { id: student.id },
+      {
+        $set: {
+          classId: resolvedClassId,
+          studentNumber: String(studentNumber ?? student.studentNumber),
+          name: String(name ?? student.name),
+          email: String(email ?? student.email ?? ''),
+          isActive: isActive === undefined ? Boolean(student.isActive) : Boolean(isActive),
+        },
+      },
     )
-    ok(res, getStudentById(student.id))
+    ok(res, await getStudentById(student.id))
   } catch (error) {
-    if (String(error.message).includes('UNIQUE')) {
-      return fail(res, 409, 'DUPLICATE_STUDENT_NUMBER', '이미 등록된 학번입니다.')
-    }
+    if (isDuplicate(error)) return fail(res, 409, 'DUPLICATE_STUDENT_NUMBER', '이미 등록된 학번입니다.')
     throw error
   }
-})
+}))
 
-app.delete('/api/students/:id', authRequired(['teacher', 'admin']), (req, res) => {
-  const student = getStudentById(req.params.id)
+app.delete('/api/students/:id', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const student = await getStudentById(req.params.id)
   if (!student) return fail(res, 404, 'NOT_FOUND', '학생을 찾을 수 없습니다.')
-  run('DELETE FROM attendance_records WHERE student_id = ?', [student.id])
-  run('DELETE FROM qr_sessions WHERE student_id = ?', [student.id])
-  run('DELETE FROM students WHERE id = ?', [student.id])
+  await Promise.all([
+    col('attendanceRecords').deleteMany({ studentId: student.id }),
+    col('qrSessions').deleteMany({ studentId: student.id }),
+    col('students').deleteOne({ id: student.id }),
+  ])
   ok(res, { id: student.id, deleted: true })
-})
+}))
 
-app.get('/api/student-applications', authRequired(['teacher', 'admin']), (req, res) => {
+app.get('/api/student-applications', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const status = ['pending', 'approved', 'rejected'].includes(String(req.query.status)) ? String(req.query.status) : 'pending'
-  ok(res, all(`
-    SELECT id, name, email, status, class_id AS classId, student_number AS studentNumber,
-           reviewed_by AS reviewedBy, requested_at AS requestedAt, reviewed_at AS reviewedAt
-    FROM student_applications
-    WHERE status = ?
-    ORDER BY requested_at DESC, id DESC
-  `, [status]))
-})
+  ok(res, publicDocs(await col('studentApplications').find({ status }).sort({ requestedAt: -1, id: -1 }).toArray()))
+}))
 
-app.patch('/api/student-applications/:id', authRequired(['teacher', 'admin']), (req, res) => {
-  const application = one('SELECT * FROM student_applications WHERE id = ?', [Number(req.params.id)])
+app.patch('/api/student-applications/:id', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const application = publicDoc(await col('studentApplications').findOne({ id: Number(req.params.id) }))
   if (!application) return fail(res, 404, 'NOT_FOUND', '학생 가입 신청을 찾을 수 없습니다.')
   if (application.status !== 'pending') {
     return fail(res, 409, 'APPLICATION_ALREADY_REVIEWED', '이미 처리된 학생 가입 신청입니다.')
@@ -356,236 +340,222 @@ app.patch('/api/student-applications/:id', authRequired(['teacher', 'admin']), (
 
   const action = req.body?.status === 'rejected' ? 'rejected' : 'approved'
   if (action === 'rejected') {
-    run(
-      "UPDATE student_applications SET status = 'rejected', reviewed_by = ?, reviewed_at = ? WHERE id = ?",
-      [req.user.id, now(), application.id],
+    await col('studentApplications').updateOne(
+      { id: application.id },
+      { $set: { status: 'rejected', reviewedBy: req.user.id, reviewedAt: now() } },
     )
-    return ok(res, getStudentApplicationById(application.id))
+    return ok(res, await getStudentApplicationById(application.id))
   }
 
   const { studentNumber, classId, className, grade, classNum, name } = req.body || {}
   if (!studentNumber) return fail(res, 400, 'BAD_REQUEST', '승인할 학생의 학번을 입력해 주세요.')
 
-  const resolvedClassId = resolveClassId({ classId, className, grade, classNum })
+  const resolvedClassId = await resolveClassId({ classId, className, grade, classNum })
   const finalName = String(name || application.name)
   const finalNumber = String(studentNumber)
   try {
-    const existingStudent = one('SELECT id FROM students WHERE email = ? OR student_number = ?', [application.email, finalNumber])
+    const existingStudent = await col('students').findOne({
+      $or: [{ email: application.email }, { studentNumber: finalNumber }],
+    })
     if (existingStudent) {
-      run(
-        'UPDATE students SET name = ?, class_id = ?, student_number = ?, email = ?, is_active = 1 WHERE id = ?',
-        [finalName, resolvedClassId, finalNumber, application.email, existingStudent.id],
+      await col('students').updateOne(
+        { id: existingStudent.id },
+        { $set: { name: finalName, classId: resolvedClassId, studentNumber: finalNumber, email: application.email, isActive: true } },
       )
     } else {
-      run(
-        'INSERT INTO students (class_id, student_number, name, email, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)',
-        [resolvedClassId, finalNumber, finalName, application.email, now()],
-      )
+      await insertDoc('students', {
+        classId: resolvedClassId,
+        studentNumber: finalNumber,
+        name: finalName,
+        email: application.email,
+        isActive: true,
+        createdAt: now(),
+      })
     }
-    run(
-      "UPDATE student_applications SET status = 'approved', class_id = ?, student_number = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?",
-      [resolvedClassId, finalNumber, req.user.id, now(), application.id],
+    await col('studentApplications').updateOne(
+      { id: application.id },
+      { $set: { status: 'approved', classId: resolvedClassId, studentNumber: finalNumber, reviewedBy: req.user.id, reviewedAt: now() } },
     )
     ok(res, {
-      application: getStudentApplicationById(application.id),
-      student: getStudentById(finalNumber),
+      application: await getStudentApplicationById(application.id),
+      student: await getStudentById(finalNumber),
     })
   } catch (error) {
-    if (String(error.message).includes('UNIQUE')) {
-      return fail(res, 409, 'DUPLICATE_STUDENT_NUMBER', '이미 등록된 학번입니다.')
-    }
+    if (isDuplicate(error)) return fail(res, 409, 'DUPLICATE_STUDENT_NUMBER', '이미 등록된 학번입니다.')
     throw error
   }
-})
+}))
 
-app.get('/api/teachers', authRequired(['teacher', 'admin']), (_req, res) => {
-  ok(res, all(`
-    SELECT id, name, email, role, school, subject, status, created_at AS joinedAt
-    FROM teachers
-    ORDER BY created_at DESC, id DESC
-  `))
-})
+app.get('/api/teachers', authRequired(['teacher', 'admin']), route(async (_req, res) => {
+  ok(res, publicDocs(await col('teachers').find({}, { projection: { passwordHash: 0 } }).sort({ createdAt: -1, id: -1 }).toArray()))
+}))
 
-app.get('/api/teachers/export.csv', authRequired(['teacher', 'admin']), (_req, res) => {
-  const rows = all(`
-    SELECT name, email, role, school, subject, status, created_at AS joinedAt
-    FROM teachers
-    ORDER BY created_at DESC, id DESC
-  `)
+app.get('/api/teachers/export.csv', authRequired(['teacher', 'admin']), route(async (_req, res) => {
+  const rows = publicDocs(await col('teachers').find({}, { projection: { passwordHash: 0 } }).sort({ createdAt: -1, id: -1 }).toArray())
   const csv = [
     ['name', 'email', 'role', 'school', 'subject', 'status', 'joinedAt'],
-    ...rows.map((row) => [row.name, row.email, row.role, row.school, row.subject, row.status, row.joinedAt]),
+    ...rows.map((row) => [row.name, row.email, row.role, row.school, row.subject, row.status, row.createdAt]),
   ].map((line) => line.map(csvCell).join(',')).join('\n')
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
   res.setHeader('Content-Disposition', 'attachment; filename="teachers.csv"')
   res.send(`\uFEFF${csv}`)
-})
+}))
 
-app.post('/api/teachers', authRequired(['admin', 'teacher']), (req, res) => {
+app.post('/api/teachers', authRequired(['admin', 'teacher']), route(async (req, res) => {
   const { name, email, role = 'teacher', school = '학교', subject = '', status = 'active', password = '1234' } = req.body || {}
   if (!name || !email) return fail(res, 400, 'BAD_REQUEST', '이름과 이메일을 입력해 주세요.')
 
   try {
-    run(
-      `INSERT INTO teachers (name, email, role, password_hash, school, subject, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [String(name), String(email), normalizeRole(role), hashPassword(password), String(school), String(subject), normalizeTeacherStatus(status), now()],
-    )
-    ok(res, getTeacherById(db.prepare('SELECT last_insert_rowid() AS id').get().id))
+    const teacher = await insertDoc('teachers', {
+      name: String(name),
+      email: String(email),
+      role: normalizeRole(role),
+      passwordHash: hashPassword(password),
+      school: String(school),
+      subject: String(subject),
+      status: normalizeTeacherStatus(status),
+      createdAt: now(),
+    })
+    ok(res, await getTeacherById(teacher.id))
   } catch (error) {
-    if (String(error.message).includes('UNIQUE')) {
-      return fail(res, 409, 'DUPLICATE_TEACHER_EMAIL', '이미 등록된 교사 이메일입니다.')
-    }
+    if (isDuplicate(error)) return fail(res, 409, 'DUPLICATE_TEACHER_EMAIL', '이미 등록된 교사 이메일입니다.')
     throw error
   }
-})
+}))
 
-app.patch('/api/teachers/:id', authRequired(['admin', 'teacher']), (req, res) => {
-  const teacher = getTeacherById(req.params.id)
+app.patch('/api/teachers/:id', authRequired(['admin', 'teacher']), route(async (req, res) => {
+  const teacher = await getTeacherById(req.params.id)
   if (!teacher) return fail(res, 404, 'NOT_FOUND', '교사를 찾을 수 없습니다.')
 
   const { name, email, role, school, subject, status } = req.body || {}
   try {
-    run(
-      `UPDATE teachers
-       SET name = ?, email = ?, role = ?, school = ?, subject = ?, status = ?
-       WHERE id = ?`,
-      [
-        String(name ?? teacher.name),
-        String(email ?? teacher.email),
-        normalizeRole(role ?? teacher.role),
-        String(school ?? teacher.school ?? '학교'),
-        String(subject ?? teacher.subject ?? ''),
-        normalizeTeacherStatus(status ?? teacher.status),
-        teacher.id,
-      ],
+    await col('teachers').updateOne(
+      { id: teacher.id },
+      {
+        $set: {
+          name: String(name ?? teacher.name),
+          email: String(email ?? teacher.email),
+          role: normalizeRole(role ?? teacher.role),
+          school: String(school ?? teacher.school ?? '학교'),
+          subject: String(subject ?? teacher.subject ?? ''),
+          status: normalizeTeacherStatus(status ?? teacher.status),
+        },
+      },
     )
-    ok(res, getTeacherById(teacher.id))
+    ok(res, await getTeacherById(teacher.id))
   } catch (error) {
-    if (String(error.message).includes('UNIQUE')) {
-      return fail(res, 409, 'DUPLICATE_TEACHER_EMAIL', '이미 등록된 교사 이메일입니다.')
-    }
+    if (isDuplicate(error)) return fail(res, 409, 'DUPLICATE_TEACHER_EMAIL', '이미 등록된 교사 이메일입니다.')
     throw error
   }
-})
+}))
 
-app.delete('/api/teachers/:id', authRequired(['admin', 'teacher']), (req, res) => {
-  const teacher = getTeacherById(req.params.id)
+app.delete('/api/teachers/:id', authRequired(['admin', 'teacher']), route(async (req, res) => {
+  const teacher = await getTeacherById(req.params.id)
   if (!teacher) return fail(res, 404, 'NOT_FOUND', '교사를 찾을 수 없습니다.')
-  run('DELETE FROM teachers WHERE id = ?', [teacher.id])
+  await col('teachers').deleteOne({ id: teacher.id })
   ok(res, { id: teacher.id, deleted: true })
-})
+}))
 
-app.get('/api/school-location', authOptional, (_req, res) => {
-  ok(res, getSchoolLocation())
-})
+app.get('/api/school-location', authOptional, route(async (_req, res) => {
+  ok(res, await getSchoolLocation())
+}))
 
-app.put('/api/school-location', authRequired(['teacher', 'admin']), (req, res) => {
+app.put('/api/school-location', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const { name = '학교', latitude, longitude, radiusMeters } = req.body || {}
   if (!isFiniteNumber(latitude) || !isFiniteNumber(longitude) || !isFiniteNumber(radiusMeters)) {
     return fail(res, 400, 'BAD_REQUEST', '위도, 경도, 허용 반경을 숫자로 입력해 주세요.')
   }
 
-  run(
-    `UPDATE school_locations SET name = ?, latitude = ?, longitude = ?, radius_meters = ? WHERE id = 1`,
-    [String(name), latitude, longitude, radiusMeters],
+  await col('schools').updateOne(
+    { id: 1 },
+    { $set: { name: String(name), latitude: Number(latitude), longitude: Number(longitude), radiusMeters: Number(radiusMeters) } },
+    { upsert: true },
   )
-  ok(res, getSchoolLocation())
-})
+  ok(res, await getSchoolLocation())
+}))
 
-app.post('/api/location/verify', authOptional, (req, res) => {
+app.post('/api/location/verify', authOptional, route(async (req, res) => {
   const { latitude, longitude } = req.body || {}
-  ok(res, { insideSchoolArea: isInsideSchool(latitude, longitude) })
-})
+  ok(res, { insideSchoolArea: await isInsideSchool(latitude, longitude) })
+}))
 
-app.post('/api/qr-sessions', authOptional, (req, res) => {
-  const student = getStudentFromRequest(req)
+app.post('/api/qr-sessions', authOptional, route(async (req, res) => {
+  const student = await getStudentFromRequest(req)
+  if (!student) return fail(res, 404, 'STUDENT_NOT_FOUND', '출석 처리할 학생을 찾을 수 없습니다.')
   const { classId = student.classId, latitude, longitude, accuracyMeters } = req.body || {}
-  if (!isInsideSchool(latitude, longitude)) {
+  if (!await isInsideSchool(latitude, longitude)) {
     return fail(res, 422, 'OUT_OF_SCHOOL_AREA', '학교 인증 구역 밖에서는 QR 코드를 발급할 수 없습니다.')
   }
 
   const token = crypto.randomBytes(32).toString('base64url')
   const expiresAt = new Date(Date.now() + QR_TTL_SECONDS * 1000).toISOString()
-  const tokenHash = hashToken(token)
-  const createdAt = now()
-
-  run(
-    `INSERT INTO qr_sessions (student_id, class_id, token_hash, latitude, longitude, accuracy_meters, expires_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [student.id, Number(classId), tokenHash, latitude ?? null, longitude ?? null, accuracyMeters ?? null, expiresAt, createdAt],
-  )
+  const session = await insertDoc('qrSessions', {
+    studentId: student.id,
+    classId: Number(classId),
+    tokenHash: hashToken(token),
+    latitude: latitude ?? null,
+    longitude: longitude ?? null,
+    accuracyMeters: accuracyMeters ?? null,
+    expiresAt,
+    usedAt: null,
+    createdAt: now(),
+  })
 
   ok(res, {
-    qrSessionId: db.prepare('SELECT last_insert_rowid() AS id').get().id,
+    qrSessionId: session.id,
     qrPayload: `attendi://attendance?token=${token}`,
     expiresAt,
     expiresInSeconds: QR_TTL_SECONDS,
   })
-})
+}))
 
-app.post('/api/qr-sessions/verify', authRequired(['teacher', 'admin', 'device']), (req, res) => {
+app.post('/api/qr-sessions/verify', authRequired(['teacher', 'admin', 'device']), route(async (req, res) => {
   const { qrPayload } = req.body || {}
   const token = extractQrToken(qrPayload)
   if (!token) return fail(res, 400, 'INVALID_QR', '유효하지 않은 QR 코드입니다.')
 
-  const session = one('SELECT * FROM qr_sessions WHERE token_hash = ?', [hashToken(token)])
+  const session = publicDoc(await col('qrSessions').findOne({ tokenHash: hashToken(token) }))
   if (!session) return fail(res, 400, 'INVALID_QR', '유효하지 않은 QR 코드입니다.')
-  if (session.used_at) return fail(res, 409, 'DUPLICATE_ATTENDANCE', '이미 출석 처리된 QR 코드입니다.')
-  if (new Date(session.expires_at).getTime() < Date.now()) {
+  if (session.usedAt) return fail(res, 409, 'DUPLICATE_ATTENDANCE', '이미 출석 처리된 QR 코드입니다.')
+  if (new Date(session.expiresAt).getTime() < Date.now()) {
     return fail(res, 410, 'QR_EXPIRED', '만료된 QR 코드입니다.')
   }
 
   const verifiedAt = now()
-  const today = verifiedAt.slice(0, 10)
+  const date = verifiedAt.slice(0, 10)
   const status = getAttendanceStatus()
-  const existing = one(
-    'SELECT id FROM attendance_records WHERE student_id = ? AND class_id = ? AND date = ?',
-    [session.student_id, session.class_id, today],
-  )
+  const existing = await col('attendanceRecords').findOne({ studentId: session.studentId, classId: session.classId, date })
   if (existing) return fail(res, 409, 'DUPLICATE_ATTENDANCE', '이미 출석 처리된 학생입니다.')
 
-  run('UPDATE qr_sessions SET used_at = ? WHERE id = ?', [verifiedAt, session.id])
-  run(
-    `INSERT INTO attendance_records
-      (student_id, class_id, date, status, memo, verified_by_qr, verified_latitude, verified_longitude, verified_at, updated_at)
-     VALUES (?, ?, ?, ?, '', 1, ?, ?, ?, ?)`,
-    [session.student_id, session.class_id, today, status, session.latitude, session.longitude, verifiedAt, verifiedAt],
-  )
+  await col('qrSessions').updateOne({ id: session.id }, { $set: { usedAt: verifiedAt } })
+  await insertDoc('attendanceRecords', {
+    studentId: session.studentId,
+    classId: session.classId,
+    date,
+    status,
+    memo: '',
+    verifiedByQr: true,
+    verifiedLatitude: session.latitude,
+    verifiedLongitude: session.longitude,
+    verifiedAt,
+    updatedAt: verifiedAt,
+  })
 
-  const student = one(`
-    SELECT s.id, s.name, s.student_number AS studentNumber, c.name AS className
-    FROM students s
-    JOIN classes c ON c.id = s.class_id
-    WHERE s.id = ?
-  `, [session.student_id])
+  const student = await getStudentById(session.studentId)
   ok(res, { result: 'accepted', status: toClientStatus(status), verifiedAt, student })
-})
+}))
 
-app.get('/api/attendance/summary', authOptional, (req, res) => {
-  const date = req.query.date || today()
+app.get('/api/attendance/summary', authOptional, route(async (req, res) => {
+  const date = String(req.query.date || today())
   const classId = req.query.classId ? Number(req.query.classId) : null
-  const classFilter = classId ? 'AND class_id = ?' : ''
-  const classParams = classId ? [classId] : []
-  const rows = all(
-    `SELECT status, COUNT(*) AS count FROM attendance_records WHERE date = ? ${classFilter} GROUP BY status`,
-    [date, ...classParams],
-  )
-  const total = one(
-    `SELECT COUNT(*) AS count FROM students WHERE is_active = 1 ${classId ? 'AND class_id = ?' : ''}`,
-    classParams,
-  ).count
-  const counts = Object.fromEntries(rows.map((row) => [row.status, row.count]))
-  const recentScans = all(`
-    SELECT s.id AS studentId, s.name AS studentName, s.student_number AS studentNumber,
-           c.name AS className, ar.status, ar.verified_at AS verifiedAt
-    FROM attendance_records ar
-    JOIN students s ON s.id = ar.student_id
-    JOIN classes c ON c.id = ar.class_id
-    WHERE ar.date = ? ${classId ? 'AND ar.class_id = ?' : ''}
-    ORDER BY ar.verified_at DESC
-    LIMIT 8
-  `, [date, ...classParams])
+  const filter = { date, ...(classId ? { classId } : {}) }
+  const [records, total, recentRecords] = await Promise.all([
+    col('attendanceRecords').find(filter).toArray(),
+    col('students').countDocuments({ isActive: true, ...(classId ? { classId } : {}) }),
+    col('attendanceRecords').find(filter).sort({ verifiedAt: -1, id: -1 }).limit(8).toArray(),
+  ])
+  const counts = countStatuses(records)
+  const recentScans = await Promise.all(publicDocs(recentRecords).map(withRecentAttendanceNames))
 
   ok(res, {
     date,
@@ -599,28 +569,23 @@ app.get('/api/attendance/summary', authOptional, (req, res) => {
     },
     recentScans: recentScans.map((row) => ({ ...row, status: toClientStatus(row.status) })),
   })
-})
+}))
 
-app.get('/api/attendance/weekly-summary', authOptional, (req, res) => {
+app.get('/api/attendance/weekly-summary', authOptional, route(async (req, res) => {
   const targetDate = String(req.query.date || today())
   const classId = req.query.classId ? Number(req.query.classId) : null
   const days = getWeekDatesThrough(targetDate)
-  const total = one(
-    `SELECT COUNT(*) AS count FROM students WHERE is_active = 1 ${classId ? 'AND class_id = ?' : ''}`,
-    classId ? [classId] : [],
-  ).count
-  const classFilter = classId ? 'AND class_id = ?' : ''
-  const rows = all(
-    `SELECT date, status, COUNT(*) AS count
-     FROM attendance_records
-     WHERE date BETWEEN ? AND ? ${classFilter}
-     GROUP BY date, status`,
-    [days[0], days[days.length - 1], ...(classId ? [classId] : [])],
-  )
+  const [total, records] = await Promise.all([
+    col('students').countDocuments({ isActive: true, ...(classId ? { classId } : {}) }),
+    col('attendanceRecords').find({
+      date: { $gte: days[0], $lte: days[days.length - 1] },
+      ...(classId ? { classId } : {}),
+    }).toArray(),
+  ])
   const countByDate = new Map()
-  for (const row of rows) {
+  for (const row of records) {
     if (!countByDate.has(row.date)) countByDate.set(row.date, {})
-    countByDate.get(row.date)[row.status] = row.count
+    countByDate.get(row.date)[row.status] = (countByDate.get(row.date)[row.status] || 0) + 1
   }
 
   ok(res, {
@@ -645,14 +610,14 @@ app.get('/api/attendance/weekly-summary', authOptional, (req, res) => {
       }
     }),
   })
-})
+}))
 
-app.get('/api/attendance', authOptional, (req, res) => {
-  ok(res, readAttendanceRows(req.query).map(toClientAttendanceRow))
-})
+app.get('/api/attendance', authOptional, route(async (req, res) => {
+  ok(res, (await readAttendanceRows(req.query)).map(toClientAttendanceRow))
+}))
 
-app.get('/api/attendance/export.csv', authOptional, (req, res) => {
-  const rows = readAttendanceRows(req.query)
+app.get('/api/attendance/export.csv', authOptional, route(async (req, res) => {
+  const rows = await readAttendanceRows(req.query)
   const header = ['date', 'className', 'studentNumber', 'studentName', 'status', 'verifiedByQr', 'verifiedAt', 'memo']
   const body = rows.map((row) => [
     row.date,
@@ -668,63 +633,87 @@ app.get('/api/attendance/export.csv', authOptional, (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
   res.setHeader('Content-Disposition', 'attachment; filename="attendance.csv"')
   res.send(`\uFEFF${csv}`)
-})
+}))
 
-app.post('/api/attendance/manual', authRequired(['teacher', 'admin']), (req, res) => {
+app.post('/api/attendance/manual', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const { records, date = today() } = req.body || {}
   const input = Array.isArray(records) ? records : [req.body]
   const saved = []
 
   for (const item of input) {
     if (!item || !item.studentId || !item.status) continue
-    const student = getStudentById(item.studentId)
+    const student = await getStudentById(item.studentId)
     if (!student) continue
     const status = toDbStatus(item.status)
     const verifiedAt = status === 'absent' ? null : toIsoAtDateTime(date, item.time)
     const updatedAt = now()
-    run(
-      `INSERT INTO attendance_records
-        (student_id, class_id, date, status, memo, verified_by_qr, verified_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-       ON CONFLICT(student_id, class_id, date) DO UPDATE SET
-         status = excluded.status,
-         memo = excluded.memo,
-         verified_by_qr = 0,
-         verified_at = excluded.verified_at,
-         updated_at = excluded.updated_at`,
-      [student.id, student.classId, date, status, item.memo || item.note || '', verifiedAt, updatedAt],
-    )
+    const filter = { studentId: student.id, classId: student.classId, date: String(date) }
+    const existing = await col('attendanceRecords').findOne(filter)
+    const data = {
+      ...filter,
+      status,
+      memo: item.memo || item.note || '',
+      verifiedByQr: false,
+      verifiedAt,
+      updatedAt,
+    }
+    if (existing) {
+      await col('attendanceRecords').updateOne({ id: existing.id }, { $set: data })
+    } else {
+      await insertDoc('attendanceRecords', data)
+    }
     saved.push({ studentId: student.id, status: toClientStatus(status) })
   }
 
   ok(res, { savedCount: saved.length, records: saved })
-})
+}))
 
-app.get('/api/device-tokens', authRequired(['teacher', 'admin']), (_req, res) => {
-  ok(res, all(`
-    SELECT id, token, device_name AS deviceName, location, revoked_at AS revokedAt,
-           last_used_at AS lastUsedAt, created_at AS createdAt, 0 AS usageCount
-    FROM device_tokens
-    ORDER BY created_at DESC, id DESC
-  `))
-})
+app.get('/api/device-tokens', authRequired(['teacher', 'admin']), route(async (_req, res) => {
+  const rows = publicDocs(await col('deviceTokens').find().sort({ createdAt: -1, id: -1 }).toArray())
+  ok(res, rows.map((row) => ({ ...row, usageCount: 0 })))
+}))
 
-app.post('/api/device-tokens', authRequired(['teacher', 'admin']), (req, res) => {
+app.post('/api/device-tokens', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const { deviceName = '새 기기', location = '미지정' } = req.body || {}
-  const token = generateDeviceToken()
-  run(
-    'INSERT INTO device_tokens (token, device_name, location, created_at) VALUES (?, ?, ?, ?)',
-    [token, String(deviceName), String(location), now()],
-  )
-  ok(res, getDeviceTokenById(db.prepare('SELECT last_insert_rowid() AS id').get().id))
+  const token = await generateDeviceToken()
+  const device = await insertDoc('deviceTokens', {
+    token,
+    deviceName: String(deviceName),
+    location: String(location),
+    revokedAt: null,
+    lastUsedAt: null,
+    createdAt: now(),
+  })
+  ok(res, await getDeviceTokenById(device.id))
+}))
+
+app.delete('/api/device-tokens/:id', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const device = await getDeviceTokenById(req.params.id)
+  if (!device) return fail(res, 404, 'NOT_FOUND', '기기 토큰을 찾을 수 없습니다.')
+  await col('deviceTokens').updateOne({ id: device.id }, { $set: { revokedAt: now() } })
+  ok(res, await getDeviceTokenById(device.id))
+}))
+
+app.use((error, _req, res, _next) => {
+  console.error(error)
+  fail(res, 500, 'INTERNAL_SERVER_ERROR', '서버 오류가 발생했습니다.')
 })
 
-app.delete('/api/device-tokens/:id', authRequired(['teacher', 'admin']), (req, res) => {
-  const device = getDeviceTokenById(req.params.id)
-  if (!device) return fail(res, 404, 'NOT_FOUND', '기기 토큰을 찾을 수 없습니다.')
-  run('UPDATE device_tokens SET revoked_at = ? WHERE id = ?', [now(), device.id])
-  ok(res, getDeviceTokenById(device.id))
-})
+export default app
+
+if (!process.env.VERCEL) {
+  const server = app.listen(PORT, () => {
+    console.log(`Attendi API listening on http://localhost:${PORT}`)
+  })
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use. Stop the existing server or set PORT to another value.`)
+      process.exit(1)
+    }
+    throw error
+  })
+}
 
 function getWeekDatesThrough(targetDate) {
   const target = new Date(`${targetDate}T00:00:00`)
@@ -753,27 +742,45 @@ function formatDateKey(date) {
   ].join('-')
 }
 
-function getStudentApplicationById(id) {
-  return one(`
-    SELECT id, name, email, status, class_id AS classId, student_number AS studentNumber,
-           reviewed_by AS reviewedBy, requested_at AS requestedAt, reviewed_at AS reviewedAt
-    FROM student_applications
-    WHERE id = ?
-  `, [Number(id)])
+async function getStudentApplicationById(id) {
+  return publicDoc(await col('studentApplications').findOne({ id: Number(id) }))
 }
 
-export default app
+async function withClassName(student) {
+  const cls = await col('classes').findOne({ id: Number(student.classId) }, { projection: { _id: 0 } })
+  return { ...student, className: cls?.name || '' }
+}
 
-if (!process.env.VERCEL) {
-  const server = app.listen(PORT, () => {
-    console.log(`Attendi API listening on http://localhost:${PORT}`)
-  })
+async function withRecentAttendanceNames(row) {
+  const [student, cls] = await Promise.all([
+    col('students').findOne({ id: Number(row.studentId) }, { projection: { _id: 0 } }),
+    col('classes').findOne({ id: Number(row.classId) }, { projection: { _id: 0 } }),
+  ])
+  return {
+    studentId: student?.id || row.studentId,
+    studentName: student?.name || '',
+    studentNumber: student?.studentNumber || '',
+    className: cls?.name || '',
+    status: row.status,
+    verifiedAt: row.verifiedAt,
+  }
+}
 
-  server.on('error', (error) => {
-    if (error.code === 'EADDRINUSE') {
-      console.error(`Port ${PORT} is already in use. Stop the existing server or set PORT to another value.`)
-      process.exit(1)
-    }
-    throw error
-  })
+function countStatuses(records) {
+  return records.reduce((acc, row) => {
+    acc[row.status] = (acc[row.status] || 0) + 1
+    return acc
+  }, {})
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function isDuplicate(error) {
+  return error?.code === 11000
+}
+
+function duplicateMessage(error, fallback) {
+  return isDuplicate(error) ? '중복된 값' : fallback
 }

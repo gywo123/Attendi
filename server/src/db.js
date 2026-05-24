@@ -1,162 +1,129 @@
-import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { MongoClient } from 'mongodb'
+import { DB_NAME, MONGODB_URI } from './config.js'
 import { hashPassword } from './security.js'
 import { now } from './time.js'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const dataDir = join(__dirname, '..', 'data')
-const dbPath = process.env.SQLITE_PATH || (process.env.VERCEL ? join(tmpdir(), 'attendi.sqlite') : join(dataDir, 'attendi.sqlite'))
-const dbDir = dirname(dbPath)
-if (!existsSync(dbDir)) mkdirSync(dbDir, { recursive: true })
+let client
+let database
 
-export const db = new DatabaseSync(dbPath)
+export async function initDb() {
+  if (database) return database
+  if (!MONGODB_URI) {
+    throw new Error('MONGODB_URI environment variable is required.')
+  }
 
-export function initDb() {
-  db.exec(`
-    PRAGMA foreign_keys = ON;
-    CREATE TABLE IF NOT EXISTS school_locations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      latitude REAL NOT NULL,
-      longitude REAL NOT NULL,
-      radius_meters INTEGER NOT NULL DEFAULT 100
-    );
-    CREATE TABLE IF NOT EXISTS classes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      school_location_id INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS students (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      class_id INTEGER NOT NULL,
-      student_number TEXT NOT NULL UNIQUE,
-      name TEXT NOT NULL,
-      email TEXT,
-      is_active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS student_applications (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      class_id INTEGER,
-      student_number TEXT,
-      reviewed_by INTEGER,
-      requested_at TEXT NOT NULL,
-      reviewed_at TEXT
-    );
-    CREATE TABLE IF NOT EXISTS teachers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL UNIQUE,
-      role TEXT NOT NULL,
-      password_hash TEXT NOT NULL,
-      school TEXT NOT NULL DEFAULT '학교',
-      subject TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL DEFAULT 'active',
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS device_tokens (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      token TEXT NOT NULL UNIQUE,
-      device_name TEXT,
-      location TEXT,
-      revoked_at TEXT,
-      last_used_at TEXT,
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS qr_sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      student_id INTEGER NOT NULL,
-      class_id INTEGER NOT NULL,
-      token_hash TEXT NOT NULL UNIQUE,
-      latitude REAL,
-      longitude REAL,
-      accuracy_meters REAL,
-      expires_at TEXT NOT NULL,
-      used_at TEXT,
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS attendance_records (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      student_id INTEGER NOT NULL,
-      class_id INTEGER NOT NULL,
-      date TEXT NOT NULL,
-      status TEXT NOT NULL,
-      memo TEXT,
-      verified_by_qr INTEGER NOT NULL DEFAULT 0,
-      verified_latitude REAL,
-      verified_longitude REAL,
-      verified_at TEXT,
-      updated_at TEXT NOT NULL,
-      UNIQUE(student_id, class_id, date)
-    );
-  `)
-  ensureColumn('teachers', 'school', "TEXT NOT NULL DEFAULT '학교'")
-  ensureColumn('teachers', 'subject', "TEXT NOT NULL DEFAULT ''")
-  ensureColumn('teachers', 'status', "TEXT NOT NULL DEFAULT 'active'")
-  ensureColumn('device_tokens', 'location', 'TEXT')
-  ensureColumn('student_applications', 'class_id', 'INTEGER')
-  ensureColumn('student_applications', 'student_number', 'TEXT')
-  ensureColumn('student_applications', 'reviewed_by', 'INTEGER')
-  ensureColumn('student_applications', 'reviewed_at', 'TEXT')
+  client = new MongoClient(MONGODB_URI, {
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 10000,
+  })
+  await client.connect()
+  database = client.db(DB_NAME)
+
+  await Promise.all([
+    col('counters').createIndex({ _id: 1 }, { unique: true }),
+    col('schools').createIndex({ id: 1 }, { unique: true }),
+    col('classes').createIndex({ id: 1 }, { unique: true }),
+    col('students').createIndex({ id: 1 }, { unique: true }),
+    col('students').createIndex({ studentNumber: 1 }, { unique: true }),
+    col('students').createIndex({ email: 1 }),
+    col('studentApplications').createIndex({ id: 1 }, { unique: true }),
+    col('studentApplications').createIndex({ email: 1, status: 1 }),
+    col('teachers').createIndex({ id: 1 }, { unique: true }),
+    col('teachers').createIndex({ email: 1 }, { unique: true }),
+    col('deviceTokens').createIndex({ id: 1 }, { unique: true }),
+    col('deviceTokens').createIndex({ token: 1 }, { unique: true }),
+    col('qrSessions').createIndex({ id: 1 }, { unique: true }),
+    col('qrSessions').createIndex({ tokenHash: 1 }, { unique: true }),
+    col('attendanceRecords').createIndex({ id: 1 }, { unique: true }),
+    col('attendanceRecords').createIndex({ studentId: 1, classId: 1, date: 1 }, { unique: true }),
+  ])
+
+  return database
 }
 
-export function ensureInitialData() {
-  if (!one('SELECT id FROM school_locations WHERE id = 1')) {
-    run(
-      'INSERT INTO school_locations (id, name, latitude, longitude, radius_meters) VALUES (1, ?, ?, ?, ?)',
-      [
-        process.env.SCHOOL_NAME || '학교',
-        Number(process.env.SCHOOL_LATITUDE || 37.2538509301),
-        Number(process.env.SCHOOL_LONGITUDE || 126.9823507279),
-        Number(process.env.SCHOOL_RADIUS_METERS || 100),
-      ],
-    )
+export function col(name) {
+  if (!database) throw new Error('Database has not been initialized.')
+  return database.collection(name)
+}
+
+export async function ensureInitialData() {
+  if (!await col('schools').findOne({ id: 1 })) {
+    await col('schools').insertOne({
+      id: 1,
+      name: process.env.SCHOOL_NAME || '학교',
+      latitude: Number(process.env.SCHOOL_LATITUDE || 37.2538509301),
+      longitude: Number(process.env.SCHOOL_LONGITUDE || 126.9823507279),
+      radiusMeters: Number(process.env.SCHOOL_RADIUS_METERS || 100),
+    })
+    await syncCounter('schools')
   }
-  if (one('SELECT COUNT(*) AS count FROM classes').count === 0) {
+
+  if (await col('classes').countDocuments() === 0) {
     for (const name of ['3학년 1반', '3학년 2반', '2학년 1반', '2학년 2반']) {
-      run('INSERT INTO classes (name, school_location_id, created_at) VALUES (?, 1, ?)', [name, now()])
+      await insertDoc('classes', { name, schoolLocationId: 1, createdAt: now() })
     }
   }
-  ensureTeacherInitial('관리자', 'admin@school.kr', 'admin', '')
+
+  await ensureTeacherInitial('관리자', 'admin@school.kr', 'admin', '')
 }
 
-export function all(sql, params = []) {
-  return db.prepare(sql).all(...params)
+export async function nextId(name) {
+  const result = await col('counters').findOneAndUpdate(
+    { _id: name },
+    { $inc: { seq: 1 } },
+    { upsert: true, returnDocument: 'after' },
+  )
+  return result?.seq ?? result?.value?.seq
 }
 
-export function one(sql, params = []) {
-  return db.prepare(sql).get(...params)
+export async function insertDoc(name, doc) {
+  const id = doc.id ?? await nextId(name)
+  const finalDoc = { ...doc, id }
+  await col(name).insertOne(finalDoc)
+  return finalDoc
 }
 
-export function run(sql, params = []) {
-  return db.prepare(sql).run(...params)
+export async function replaceDoc(name, filter, update) {
+  await col(name).updateOne(filter, { $set: update })
+  return col(name).findOne(filter, { projection: { _id: 0 } })
 }
 
-function ensureTeacherInitial(name, email, role, subject) {
-  const existing = one('SELECT id FROM teachers WHERE email = ?', [email])
+export function publicDoc(doc) {
+  if (!doc) return null
+  const { _id, ...rest } = doc
+  return rest
+}
+
+export function publicDocs(docs) {
+  return docs.map(publicDoc)
+}
+
+async function ensureTeacherInitial(name, email, role, subject) {
+  const existing = await col('teachers').findOne({ email })
+  const data = {
+    name,
+    role,
+    passwordHash: hashPassword('1234'),
+    school: '학교',
+    subject,
+    status: 'active',
+  }
   if (existing) {
-    run(
-      `UPDATE teachers
-       SET name = ?, role = ?, password_hash = ?, school = ?, subject = ?
-       WHERE id = ?`,
-      [name, role, hashPassword('1234'), '학교', subject, existing.id],
-    )
+    await col('teachers').updateOne({ id: existing.id }, { $set: data })
     return
   }
-  run(
-    'INSERT INTO teachers (name, email, role, password_hash, school, subject, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [name, email, role, hashPassword('1234'), '학교', subject, 'active', now()],
-  )
+  await insertDoc('teachers', {
+    ...data,
+    email,
+    createdAt: now(),
+  })
 }
 
-function ensureColumn(table, column, definition) {
-  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column)
-  if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+async function syncCounter(name) {
+  const max = await col(name).find().sort({ id: -1 }).limit(1).next()
+  await col('counters').updateOne(
+    { _id: name },
+    { $max: { seq: Number(max?.id || 0) } },
+    { upsert: true },
+  )
 }

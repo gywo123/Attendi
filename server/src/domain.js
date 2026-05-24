@@ -1,63 +1,56 @@
-import { all, one, run } from './db.js'
+import { col, insertDoc, publicDoc, publicDocs } from './db.js'
 import { now } from './time.js'
 
-export function getStudentFromRequest(req) {
+export async function getStudentFromRequest(req) {
   if (req.user?.role === 'student') {
-    const student = one('SELECT id, class_id AS classId, student_number AS studentNumber, name FROM students WHERE id = ?', [req.user.id])
+    const student = await getStudentById(req.user.id)
     if (student) return student
   }
-  return one('SELECT id, class_id AS classId, student_number AS studentNumber, name FROM students ORDER BY id LIMIT 1')
+  const student = await col('students').findOne({}, { sort: { id: 1 }, projection: { _id: 0 } })
+  return student ? withClassName(student) : null
 }
 
-export function getSchoolLocation() {
-  const row = one('SELECT id, name, latitude, longitude, radius_meters AS radiusMeters FROM school_locations WHERE id = 1')
+export async function getSchoolLocation() {
+  const row = await col('schools').findOne({ id: 1 }, { projection: { _id: 0 } })
   return {
     ...row,
     devBypassLocation: String(process.env.DEV_BYPASS_LOCATION || 'true') === 'true',
   }
 }
 
-export function getStudentById(id) {
+export async function getStudentById(id) {
   const value = String(id)
   const numericId = Number(value)
   const studentNumber = value.startsWith('S') ? value.slice(1) : value
-  return one(`
-    SELECT s.id, s.class_id AS classId, s.student_number AS studentNumber, s.name,
-           s.email, s.is_active AS isActive, c.name AS className
-    FROM students s
-    JOIN classes c ON c.id = s.class_id
-    WHERE s.id = ? OR s.student_number = ? OR s.student_number = ?
-  `, [Number.isFinite(numericId) ? numericId : -1, value, studentNumber])
+  const query = Number.isFinite(numericId)
+    ? { $or: [{ id: numericId }, { studentNumber: value }, { studentNumber }] }
+    : { $or: [{ studentNumber: value }, { studentNumber }] }
+  const student = await col('students').findOne(query, { projection: { _id: 0 } })
+  return student ? withClassName(student) : null
 }
 
-export function getTeacherById(id) {
-  return one(`
-    SELECT id, name, email, role, school, subject, status, created_at AS joinedAt
-    FROM teachers
-    WHERE id = ?
-  `, [Number(id)])
+export async function getTeacherById(id) {
+  return publicDoc(await col('teachers').findOne(
+    { id: Number(id) },
+    { projection: { _id: 0, passwordHash: 0 } },
+  ))
 }
 
-export function getDeviceTokenById(id) {
-  return one(`
-    SELECT id, token, device_name AS deviceName, location, revoked_at AS revokedAt,
-           last_used_at AS lastUsedAt, created_at AS createdAt, 0 AS usageCount
-    FROM device_tokens
-    WHERE id = ?
-  `, [Number(id)])
+export async function getDeviceTokenById(id) {
+  const token = await col('deviceTokens').findOne({ id: Number(id) }, { projection: { _id: 0 } })
+  return token ? { ...token, usageCount: 0 } : null
 }
 
-export function resolveClassId({ classId, className, grade, classNum }) {
+export async function resolveClassId({ classId, className, grade, classNum }) {
   if (classId) {
-    const existing = one('SELECT id FROM classes WHERE id = ?', [Number(classId)])
+    const existing = await col('classes').findOne({ id: Number(classId) }, { projection: { _id: 0 } })
     if (existing) return existing.id
   }
 
   const normalized = toFullClassName(className || `${grade || 3}-${classNum || 1}`)
-  let cls = one('SELECT id FROM classes WHERE name = ?', [normalized])
+  let cls = await col('classes').findOne({ name: normalized }, { projection: { _id: 0 } })
   if (!cls) {
-    run('INSERT INTO classes (name, school_location_id, created_at) VALUES (?, 1, ?)', [normalized, now()])
-    cls = one('SELECT id FROM classes WHERE name = ?', [normalized])
+    cls = await insertDoc('classes', { name: normalized, schoolLocationId: 1, createdAt: now() })
   }
   return cls.id
 }
@@ -76,30 +69,23 @@ export function displayStudentNumber(studentNumber = '') {
   return Number.isFinite(parsed) && parsed > 0 ? `${parsed}번` : ''
 }
 
-export function readAttendanceRows(query = {}) {
+export async function readAttendanceRows(query = {}) {
   const { dateFrom, dateTo, classId, studentId, status } = query
-  const clauses = ['1 = 1']
-  const params = []
-  if (dateFrom) { clauses.push('ar.date >= ?'); params.push(dateFrom) }
-  if (dateTo) { clauses.push('ar.date <= ?'); params.push(dateTo) }
-  if (classId) { clauses.push('ar.class_id = ?'); params.push(Number(classId)) }
-  if (studentId) {
-    const student = getStudentById(studentId)
-    clauses.push('ar.student_id = ?')
-    params.push(student?.id || Number(studentId))
+  const filter = {}
+  if (dateFrom || dateTo) {
+    filter.date = {}
+    if (dateFrom) filter.date.$gte = String(dateFrom)
+    if (dateTo) filter.date.$lte = String(dateTo)
   }
-  if (status) { clauses.push('ar.status = ?'); params.push(toDbStatus(status)) }
+  if (classId) filter.classId = Number(classId)
+  if (studentId) {
+    const student = await getStudentById(studentId)
+    filter.studentId = student?.id || Number(studentId)
+  }
+  if (status) filter.status = toDbStatus(status)
 
-  return all(`
-    SELECT ar.id, ar.student_id AS studentId, s.name AS studentName, s.student_number AS studentNumber,
-           ar.class_id AS classId, c.name AS className, ar.date, ar.status,
-           ar.verified_by_qr AS verifiedByQr, ar.verified_at AS verifiedAt, ar.memo
-    FROM attendance_records ar
-    JOIN students s ON s.id = ar.student_id
-    JOIN classes c ON c.id = ar.class_id
-    WHERE ${clauses.join(' AND ')}
-    ORDER BY ar.date DESC, ar.verified_at DESC
-  `, params)
+  const rows = publicDocs(await col('attendanceRecords').find(filter).sort({ date: -1, verifiedAt: -1, id: -1 }).toArray())
+  return Promise.all(rows.map(withAttendanceNames))
 }
 
 export function toClientAttendanceRow(row) {
@@ -126,19 +112,19 @@ export function normalizeTeacherStatus(status) {
   return ['active', 'pending', 'inactive'].includes(status) ? status : 'active'
 }
 
-export function generateDeviceToken() {
+export async function generateDeviceToken() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   let value = ''
   do {
     value = `ATD-${Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')}`
-  } while (one('SELECT id FROM device_tokens WHERE token = ?', [value]))
+  } while (await col('deviceTokens').findOne({ token: value }))
   return value
 }
 
-export function isInsideSchool(latitude, longitude) {
+export async function isInsideSchool(latitude, longitude) {
   if (String(process.env.DEV_BYPASS_LOCATION || 'true') === 'true') return true
   if (!isFiniteNumber(latitude) || !isFiniteNumber(longitude)) return false
-  const school = getSchoolLocation()
+  const school = await getSchoolLocation()
   return distanceMeters(latitude, longitude, school.latitude, school.longitude) <= school.radiusMeters
 }
 
@@ -168,4 +154,22 @@ export function getAttendanceStatus() {
 
 export function isFiniteNumber(value) {
   return Number.isFinite(Number(value))
+}
+
+async function withClassName(student) {
+  const cls = await col('classes').findOne({ id: Number(student.classId) }, { projection: { _id: 0 } })
+  return { ...student, className: cls?.name || '' }
+}
+
+async function withAttendanceNames(row) {
+  const [student, cls] = await Promise.all([
+    col('students').findOne({ id: Number(row.studentId) }, { projection: { _id: 0 } }),
+    col('classes').findOne({ id: Number(row.classId) }, { projection: { _id: 0 } }),
+  ])
+  return {
+    ...row,
+    studentName: student?.name || '',
+    studentNumber: student?.studentNumber || '',
+    className: cls?.name || '',
+  }
 }
