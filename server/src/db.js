@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { hashPassword } from './security.js'
@@ -7,9 +8,11 @@ import { now } from './time.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const dataDir = join(__dirname, '..', 'data')
-if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true })
+const dbPath = process.env.SQLITE_PATH || (process.env.VERCEL ? join(tmpdir(), 'attendi.sqlite') : join(dataDir, 'attendi.sqlite'))
+const dbDir = dirname(dbPath)
+if (!existsSync(dbDir)) mkdirSync(dbDir, { recursive: true })
 
-export const db = new DatabaseSync(join(dataDir, 'attendi.sqlite'))
+export const db = new DatabaseSync(dbPath)
 
 export function initDb() {
   db.exec(`
@@ -110,8 +113,8 @@ export function ensureInitialData() {
       'INSERT INTO school_locations (id, name, latitude, longitude, radius_meters) VALUES (1, ?, ?, ?, ?)',
       [
         process.env.SCHOOL_NAME || '학교',
-        Number(process.env.SCHOOL_LATITUDE || 37.5012743),
-        Number(process.env.SCHOOL_LONGITUDE || 127.039585),
+        Number(process.env.SCHOOL_LATITUDE || 37.2538509301),
+        Number(process.env.SCHOOL_LONGITUDE || 126.9823507279),
         Number(process.env.SCHOOL_RADIUS_METERS || 100),
       ],
     )

@@ -49,6 +49,10 @@ app.get('/api/health', (_req, res) => {
   ok(res, { status: 'ok', time: new Date().toISOString() })
 })
 
+app.get('/', (_req, res) => {
+  ok(res, { service: 'Attendi API', health: '/api/health' })
+})
+
 app.get('/api/auth/google', (req, res) => {
   const role = req.query.role === 'teacher' ? 'teacher' : 'student'
 
@@ -758,14 +762,18 @@ function getStudentApplicationById(id) {
   `, [Number(id)])
 }
 
-export const server = app.listen(PORT, () => {
-  console.log(`Attendi API listening on http://localhost:${PORT}`)
-})
+export default app
 
-server.on('error', (error) => {
-  if (error.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use. Stop the existing server or set PORT to another value.`)
-    process.exit(1)
-  }
-  throw error
-})
+if (!process.env.VERCEL) {
+  const server = app.listen(PORT, () => {
+    console.log(`Attendi API listening on http://localhost:${PORT}`)
+  })
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use. Stop the existing server or set PORT to another value.`)
+      process.exit(1)
+    }
+    throw error
+  })
+}
