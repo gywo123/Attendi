@@ -40,7 +40,6 @@ export async function initDb() {
     database = client.db(DB_NAME)
 
     await Promise.all([
-      col('counters').createIndex({ _id: 1 }, { unique: true }),
       col('schools').createIndex({ id: 1 }, { unique: true }),
       col('classes').createIndex({ id: 1 }, { unique: true }),
       col('students').createIndex({ id: 1 }, { unique: true }),
