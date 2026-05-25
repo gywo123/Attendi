@@ -8,6 +8,21 @@ import { csvCell, fail, ok } from './http.js'
 import { parseCsv } from './csv.js'
 import { encodeClientPayload, hashPassword, hashToken, verifyPassword } from './security.js'
 import { now, today, toIsoAtDateTime } from './time.js'
+import { createBackup, restoreBackup } from './backup.js'
+import { logError, logInfo, requestContext, requestLogger } from './logger.js'
+import {
+  ValidationError,
+  assertObject,
+  dateKey,
+  enumValue,
+  optionalBoolean,
+  optionalInteger,
+  optionalNumber,
+  optionalString,
+  requiredEmail,
+  requiredNumber,
+  requiredString,
+} from './validation.js'
 import {
   extractQrToken,
   generateDeviceToken,
@@ -17,7 +32,6 @@ import {
   getStudentById,
   getStudentFromRequest,
   getTeacherById,
-  isFiniteNumber,
   isInsideSchool,
   normalizeRole,
   normalizeTeacherStatus,
@@ -48,7 +62,9 @@ const corsMiddleware = cors({
 
 app.use(corsMiddleware)
 app.options('*', corsMiddleware)
-app.use(express.json())
+app.use(requestContext)
+app.use(requestLogger)
+app.use(express.json({ limit: '10mb' }))
 
 app.get('/', (_req, res) => {
   ok(res, { service: 'Attendi API', db: 'mongodb', health: '/api/health', time: new Date().toISOString() })
@@ -62,6 +78,27 @@ app.get('/api/health', route(async (_req, res) => {
 app.use('/api', route(async (_req, _res, next) => {
   await ensureDbReady()
   next()
+}))
+
+app.get('/api/admin/backup', authRequired(['admin']), route(async (req, res) => {
+  const backup = await createBackup()
+  const fileDate = backup.exportedAt.slice(0, 10)
+  logInfo('db_backup_created', { requestId: req.requestId, userId: req.user.id, exportedAt: backup.exportedAt })
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  res.setHeader('Content-Disposition', `attachment; filename="attendi-backup-${fileDate}.json"`)
+  res.json(backup)
+}))
+
+app.post('/api/admin/restore', authRequired(['admin']), route(async (req, res) => {
+  const body = assertObject(req.body)
+  if (body.confirm !== 'RESTORE_ATTENDI') {
+    return fail(res, 400, 'RESTORE_CONFIRM_REQUIRED', 'DB 복구를 실행하려면 confirm 값을 RESTORE_ATTENDI로 보내야 합니다.')
+  }
+
+  const mode = body.mode ? enumValue(String(body.mode), ['replace', 'merge'], 'mode', '복구 방식') : 'replace'
+  const result = await restoreBackup(body.backup, { mode })
+  logInfo('db_backup_restored', { requestId: req.requestId, userId: req.user.id, mode, counts: result.counts })
+  ok(res, result)
 }))
 
 app.get('/api/auth/google', (req, res) => {
@@ -100,7 +137,7 @@ app.get('/api/auth/google/callback', route(async (req, res) => {
     }
     res.redirect(`${CLIENT_URL}?auth=${encodeClientPayload(result)}`)
   } catch (error) {
-    console.error(error)
+    logError('google_oauth_failed', error, { requestId: req.requestId })
     res.redirect(`${CLIENT_URL}?auth_error=google_oauth_failed`)
   }
 }))
@@ -110,11 +147,11 @@ app.get('/api/auth/me', authRequired([]), route(async (req, res) => {
 }))
 
 app.post('/api/auth/teacher/login', route(async (req, res) => {
-  const { email, password, passwordHash } = req.body || {}
-  const input = password || passwordHash
-  if (!email || !input) return fail(res, 400, 'BAD_REQUEST', '이메일과 비밀번호를 입력해 주세요.')
+  const body = assertObject(req.body)
+  const email = requiredEmail(body)
+  const input = requiredString(body, body.password ? 'password' : 'passwordHash', '비밀번호', { max: 200 })
 
-  const teacher = publicDoc(await col('teachers').findOne({ email: String(email) }))
+  const teacher = publicDoc(await col('teachers').findOne({ email }))
   if (!teacher || !verifyPassword(input, teacher.passwordHash)) {
     return fail(res, 401, 'UNAUTHORIZED', '이메일 또는 비밀번호가 올바르지 않습니다.')
   }
@@ -134,10 +171,12 @@ app.post('/api/auth/teacher/login', route(async (req, res) => {
 }))
 
 app.post('/api/auth/teacher/signup', route(async (req, res) => {
-  const { name, email, password, school = '학교', subject = '' } = req.body || {}
-  if (!name || !email || !password) {
-    return fail(res, 400, 'BAD_REQUEST', '이름, 이메일, 비밀번호를 입력해 주세요.')
-  }
+  const body = assertObject(req.body)
+  const name = requiredString(body, 'name', '이름')
+  const email = requiredEmail(body)
+  const password = requiredString(body, 'password', '비밀번호', { max: 200 })
+  const school = optionalString(body, 'school', '학교', { defaultValue: '학교' })
+  const subject = optionalString(body, 'subject', '담당 과목')
 
   try {
     const teacher = await insertDoc('teachers', {
@@ -158,10 +197,11 @@ app.post('/api/auth/teacher/signup', route(async (req, res) => {
 }))
 
 app.post('/api/auth/student/signup', route(async (req, res) => {
-  const { name, email } = req.body || {}
-  if (!name || !email) return fail(res, 400, 'BAD_REQUEST', '이름과 이메일을 입력해 주세요.')
+  const body = assertObject(req.body)
+  const name = requiredString(body, 'name', '이름')
+  const email = requiredEmail(body)
 
-  const activeStudent = await col('students').findOne({ email: String(email), isActive: true })
+  const activeStudent = await col('students').findOne({ email, isActive: true })
   if (activeStudent) return fail(res, 409, 'STUDENT_ALREADY_APPROVED', '이미 승인된 학생 계정입니다.')
 
   const pending = await col('studentApplications').findOne({ email: String(email), status: 'pending' })
@@ -177,10 +217,11 @@ app.post('/api/auth/student/signup', route(async (req, res) => {
 }))
 
 app.post('/api/device/login', route(async (req, res) => {
-  const { token, deviceName } = req.body || {}
-  if (!token) return fail(res, 400, 'BAD_REQUEST', '기기 토큰을 입력해 주세요.')
+  const body = assertObject(req.body)
+  const token = requiredString(body, 'token', '기기 토큰', { max: 80 })
+  const deviceName = optionalString(body, 'deviceName', '기기 이름')
 
-  const device = publicDoc(await col('deviceTokens').findOne({ token: String(token), revokedAt: null }))
+  const device = publicDoc(await col('deviceTokens').findOne({ token, revokedAt: null }))
   if (!device) return fail(res, 401, 'UNAUTHORIZED', '유효하지 않은 기기 토큰입니다.')
 
   await col('deviceTokens').updateOne(
@@ -231,9 +272,10 @@ app.get('/api/students/export.csv', authRequired(['teacher', 'admin']), route(as
 }))
 
 app.post('/api/students/import', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const body = assertObject(req.body)
   const rows = Array.isArray(req.body?.students)
     ? req.body.students
-    : parseCsv(String(req.body?.csv || ''))
+    : parseCsv(String(body.csv || ''))
   const imported = []
   const skipped = []
 
@@ -276,8 +318,15 @@ app.post('/api/students/import', authRequired(['teacher', 'admin']), route(async
 }))
 
 app.post('/api/students', authRequired(['teacher', 'admin']), route(async (req, res) => {
-  const { name, studentNumber, email = '', classId, className, grade, classNum, isActive = true } = req.body || {}
-  if (!name || !studentNumber) return fail(res, 400, 'BAD_REQUEST', '이름과 학번을 입력해 주세요.')
+  const body = assertObject(req.body)
+  const name = requiredString(body, 'name', '이름')
+  const studentNumber = requiredString(body, 'studentNumber', '학번', { max: 40 })
+  const email = body.email ? requiredEmail(body) : ''
+  const classId = optionalInteger(body, 'classId', '반 ID')
+  const className = optionalString(body, 'className', '반')
+  const grade = optionalInteger(body, 'grade', '학년')
+  const classNum = optionalInteger(body, 'classNum', '반 번호')
+  const isActive = optionalBoolean(body, 'isActive', true)
 
   const resolvedClassId = await resolveClassId({ classId, className, grade, classNum })
   try {
@@ -300,7 +349,15 @@ app.patch('/api/students/:id', authRequired(['teacher', 'admin']), route(async (
   const student = await getStudentById(req.params.id)
   if (!student) return fail(res, 404, 'NOT_FOUND', '학생을 찾을 수 없습니다.')
 
-  const { name, studentNumber, email, classId, className, grade, classNum, isActive } = req.body || {}
+  const body = assertObject(req.body)
+  const name = body.name === undefined ? undefined : requiredString(body, 'name', '이름')
+  const studentNumber = body.studentNumber === undefined ? undefined : requiredString(body, 'studentNumber', '학번', { max: 40 })
+  const email = body.email === undefined || body.email === '' ? body.email : requiredEmail(body)
+  const classId = optionalInteger(body, 'classId', '반 ID')
+  const className = optionalString(body, 'className', '반')
+  const grade = optionalInteger(body, 'grade', '학년')
+  const classNum = optionalInteger(body, 'classNum', '반 번호')
+  const isActive = body.isActive === undefined ? undefined : optionalBoolean(body, 'isActive', Boolean(student.isActive))
   const resolvedClassId = classId || className || grade || classNum
     ? await resolveClassId({ classId, className, grade, classNum })
     : student.classId
@@ -348,7 +405,8 @@ app.patch('/api/student-applications/:id', authRequired(['teacher', 'admin']), r
     return fail(res, 409, 'APPLICATION_ALREADY_REVIEWED', '이미 처리된 학생 가입 신청입니다.')
   }
 
-  const action = req.body?.status === 'rejected' ? 'rejected' : 'approved'
+  const body = assertObject(req.body)
+  const action = body.status === 'rejected' ? 'rejected' : 'approved'
   if (action === 'rejected') {
     await col('studentApplications').updateOne(
       { id: application.id },
@@ -357,8 +415,12 @@ app.patch('/api/student-applications/:id', authRequired(['teacher', 'admin']), r
     return ok(res, await getStudentApplicationById(application.id))
   }
 
-  const { studentNumber, classId, className, grade, classNum, name } = req.body || {}
-  if (!studentNumber) return fail(res, 400, 'BAD_REQUEST', '승인할 학생의 학번을 입력해 주세요.')
+  const studentNumber = requiredString(body, 'studentNumber', '승인할 학생의 학번', { max: 40 })
+  const classId = optionalInteger(body, 'classId', '반 ID')
+  const className = optionalString(body, 'className', '반')
+  const grade = optionalInteger(body, 'grade', '학년')
+  const classNum = optionalInteger(body, 'classNum', '반 번호')
+  const name = optionalString(body, 'name', '이름')
 
   const resolvedClassId = await resolveClassId({ classId, className, grade, classNum })
   const finalName = String(name || application.name)
@@ -412,18 +474,24 @@ app.get('/api/teachers/export.csv', authRequired(['teacher', 'admin']), route(as
 }))
 
 app.post('/api/teachers', authRequired(['admin', 'teacher']), route(async (req, res) => {
-  const { name, email, role = 'teacher', school = '학교', subject = '', status = 'active', password = '1234' } = req.body || {}
-  if (!name || !email) return fail(res, 400, 'BAD_REQUEST', '이름과 이메일을 입력해 주세요.')
+  const body = assertObject(req.body)
+  const name = requiredString(body, 'name', '이름')
+  const email = requiredEmail(body)
+  const role = normalizeRole(optionalString(body, 'role', '역할', { defaultValue: 'teacher' }))
+  const school = optionalString(body, 'school', '학교', { defaultValue: '학교' })
+  const subject = optionalString(body, 'subject', '담당 과목')
+  const status = normalizeTeacherStatus(optionalString(body, 'status', '상태', { defaultValue: 'active' }))
+  const password = optionalString(body, 'password', '비밀번호', { defaultValue: '1234', max: 200 })
 
   try {
     const teacher = await insertDoc('teachers', {
       name: String(name),
       email: String(email),
-      role: normalizeRole(role),
+      role,
       passwordHash: hashPassword(password),
       school: String(school),
       subject: String(subject),
-      status: normalizeTeacherStatus(status),
+      status,
       createdAt: now(),
     })
     ok(res, await getTeacherById(teacher.id))
@@ -437,7 +505,13 @@ app.patch('/api/teachers/:id', authRequired(['admin', 'teacher']), route(async (
   const teacher = await getTeacherById(req.params.id)
   if (!teacher) return fail(res, 404, 'NOT_FOUND', '교사를 찾을 수 없습니다.')
 
-  const { name, email, role, school, subject, status } = req.body || {}
+  const body = assertObject(req.body)
+  const name = body.name === undefined ? teacher.name : requiredString(body, 'name', '이름')
+  const email = body.email === undefined ? teacher.email : requiredEmail(body)
+  const role = normalizeRole(body.role === undefined ? teacher.role : optionalString(body, 'role', '역할', { defaultValue: teacher.role }))
+  const school = body.school === undefined ? teacher.school : optionalString(body, 'school', '학교', { defaultValue: teacher.school ?? '학교' })
+  const subject = body.subject === undefined ? teacher.subject : optionalString(body, 'subject', '담당 과목')
+  const status = normalizeTeacherStatus(body.status === undefined ? teacher.status : optionalString(body, 'status', '상태', { defaultValue: teacher.status }))
   try {
     await col('teachers').updateOne(
       { id: teacher.id },
@@ -471,10 +545,11 @@ app.get('/api/school-location', authOptional, route(async (_req, res) => {
 }))
 
 app.put('/api/school-location', authRequired(['teacher', 'admin']), route(async (req, res) => {
-  const { name = '학교', latitude, longitude, radiusMeters } = req.body || {}
-  if (!isFiniteNumber(latitude) || !isFiniteNumber(longitude) || !isFiniteNumber(radiusMeters)) {
-    return fail(res, 400, 'BAD_REQUEST', '위도, 경도, 허용 반경을 숫자로 입력해 주세요.')
-  }
+  const body = assertObject(req.body)
+  const name = optionalString(body, 'name', '학교 이름', { defaultValue: '학교' })
+  const latitude = requiredNumber(body, 'latitude', '위도', { min: -90, max: 90 })
+  const longitude = requiredNumber(body, 'longitude', '경도', { min: -180, max: 180 })
+  const radiusMeters = requiredNumber(body, 'radiusMeters', '허용 반경', { min: 10, max: 5000 })
 
   await col('schools').updateOne(
     { id: 1 },
@@ -485,14 +560,20 @@ app.put('/api/school-location', authRequired(['teacher', 'admin']), route(async 
 }))
 
 app.post('/api/location/verify', authOptional, route(async (req, res) => {
-  const { latitude, longitude } = req.body || {}
+  const body = assertObject(req.body)
+  const latitude = requiredNumber(body, 'latitude', '위도', { min: -90, max: 90 })
+  const longitude = requiredNumber(body, 'longitude', '경도', { min: -180, max: 180 })
   ok(res, { insideSchoolArea: await isInsideSchool(latitude, longitude) })
 }))
 
 app.post('/api/qr-sessions', authOptional, route(async (req, res) => {
   const student = await getStudentFromRequest(req)
   if (!student) return fail(res, 404, 'STUDENT_NOT_FOUND', '출석 처리할 학생을 찾을 수 없습니다.')
-  const { classId = student.classId, latitude, longitude, accuracyMeters } = req.body || {}
+  const body = assertObject(req.body)
+  const classId = optionalInteger(body, 'classId', '반 ID', { defaultValue: student.classId })
+  const latitude = requiredNumber(body, 'latitude', '위도', { min: -90, max: 90 })
+  const longitude = requiredNumber(body, 'longitude', '경도', { min: -180, max: 180 })
+  const accuracyMeters = optionalNumber(body, 'accuracyMeters', 'GPS 정확도', { min: 0, max: 10000 })
   if (!await isInsideSchool(latitude, longitude)) {
     return fail(res, 422, 'OUT_OF_SCHOOL_AREA', '학교 인증 구역 밖에서는 QR 코드를 발급할 수 없습니다.')
   }
@@ -520,7 +601,8 @@ app.post('/api/qr-sessions', authOptional, route(async (req, res) => {
 }))
 
 app.post('/api/qr-sessions/verify', authRequired(['teacher', 'admin', 'device']), route(async (req, res) => {
-  const { qrPayload } = req.body || {}
+  const body = assertObject(req.body)
+  const qrPayload = requiredString(body, 'qrPayload', 'QR 코드', { max: 500 })
   const token = extractQrToken(qrPayload)
   if (!token) return fail(res, 400, 'INVALID_QR', '유효하지 않은 QR 코드입니다.')
 
@@ -646,18 +728,20 @@ app.get('/api/attendance/export.csv', authOptional, route(async (req, res) => {
 }))
 
 app.post('/api/attendance/manual', authRequired(['teacher', 'admin']), route(async (req, res) => {
-  const { records, date = today() } = req.body || {}
-  const input = Array.isArray(records) ? records : [req.body]
+  const body = assertObject(req.body)
+  const selectedDate = body.date ? dateKey(body.date) : today()
+  const input = Array.isArray(body.records) ? body.records : [body]
   const saved = []
 
   for (const item of input) {
-    if (!item || !item.studentId || !item.status) continue
+    if (!item || typeof item !== 'object') continue
+    if (!item.studentId || !item.status) continue
     const student = await getStudentById(item.studentId)
     if (!student) continue
-    const status = toDbStatus(item.status)
-    const verifiedAt = status === 'absent' ? null : toIsoAtDateTime(date, item.time)
+    const status = toDbStatus(enumValue(String(item.status), ['present', 'late', 'absent', 'early', 'early_leave'], 'status', '출석 상태'))
+    const verifiedAt = status === 'absent' ? null : toIsoAtDateTime(selectedDate, item.time)
     const updatedAt = now()
-    const filter = { studentId: student.id, classId: student.classId, date: String(date) }
+    const filter = { studentId: student.id, classId: student.classId, date: selectedDate }
     const existing = await col('attendanceRecords').findOne(filter)
     const data = {
       ...filter,
@@ -684,7 +768,9 @@ app.get('/api/device-tokens', authRequired(['teacher', 'admin']), route(async (_
 }))
 
 app.post('/api/device-tokens', authRequired(['teacher', 'admin']), route(async (req, res) => {
-  const { deviceName = '새 기기', location = '미지정' } = req.body || {}
+  const body = req.body ? assertObject(req.body) : {}
+  const deviceName = optionalString(body, 'deviceName', '기기 이름', { defaultValue: '새 기기' })
+  const location = optionalString(body, 'location', '설치 위치', { defaultValue: '미지정' })
   const token = await generateDeviceToken()
   const device = await insertDoc('deviceTokens', {
     token,
@@ -704,9 +790,29 @@ app.delete('/api/device-tokens/:id', authRequired(['teacher', 'admin']), route(a
   ok(res, await getDeviceTokenById(device.id))
 }))
 
-app.use((error, _req, res, _next) => {
-  console.error(error)
-  fail(res, 500, 'INTERNAL_SERVER_ERROR', '서버 오류가 발생했습니다.')
+app.use((error, req, res, _next) => {
+  if (error?.type === 'entity.parse.failed') {
+    logInfo('invalid_json', { requestId: req.requestId, path: req.originalUrl })
+    return fail(res, 400, 'INVALID_JSON', 'JSON 형식이 올바르지 않습니다.')
+  }
+
+  if (error instanceof ValidationError) {
+    logInfo('validation_failed', { requestId: req.requestId, path: req.originalUrl, details: error.details })
+    return fail(res, error.status, error.code, error.message, error.details)
+  }
+
+  if (error?.name === 'ApiError') {
+    logInfo('api_error', { requestId: req.requestId, path: req.originalUrl, status: error.status, code: error.code })
+    return fail(res, error.status, error.code, error.message, error.details)
+  }
+
+  if (isDuplicate(error)) {
+    logInfo('duplicate_key', { requestId: req.requestId, path: req.originalUrl })
+    return fail(res, 409, 'DUPLICATE_VALUE', '이미 등록된 값입니다.')
+  }
+
+  logError('unhandled_error', error, { requestId: req.requestId, path: req.originalUrl })
+  fail(res, 500, 'INTERNAL_SERVER_ERROR', '서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.')
 })
 
 export default app
@@ -718,7 +824,7 @@ if (!process.env.VERCEL) {
 
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
-      console.error(`Port ${PORT} is already in use. Stop the existing server or set PORT to another value.`)
+      logError('server_port_in_use', error, { port: PORT })
       process.exit(1)
     }
     throw error

@@ -3,13 +3,16 @@ import {
   AlertCircle,
   Check,
   Crosshair,
+  Database,
+  Download,
   Loader2,
   MapPin,
   Navigation,
   Save,
   Shield,
+  Upload,
 } from 'lucide-react'
-import { apiFetch } from '../lib/api'
+import { API_BASE_URL, apiFetch, getAccessToken } from '../lib/api'
 
 type SchoolLocation = {
   id: number
@@ -41,6 +44,7 @@ export function SchoolSettingsPage() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [check, setCheck] = useState<LocationCheck | null>(null)
+  const [backupBusy, setBackupBusy] = useState(false)
 
   useEffect(() => {
     let ignore = false
@@ -119,6 +123,55 @@ export function SchoolSettingsPage() {
       setError(err instanceof Error ? err.message : '현재 위치 인증 테스트에 실패했습니다.')
     } finally {
       setChecking(false)
+    }
+  }
+
+  const downloadBackup = async () => {
+    setBackupBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      const response = await fetch(`${API_BASE_URL}/admin/backup`, {
+        headers: { Authorization: `Bearer ${getAccessToken()}` },
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.error?.message || 'DB 백업을 생성하지 못했습니다.')
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `attendi-backup-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      setMessage('DB 백업 파일을 다운로드했습니다.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'DB 백업에 실패했습니다.')
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  const restoreBackupFile = async (file?: File) => {
+    if (!file) return
+    if (!window.confirm('현재 DB를 백업 파일 기준으로 복구합니다. 계속할까요?')) return
+    setBackupBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      const backup = JSON.parse(await file.text())
+      const result = await apiFetch<{ restoredAt: string }>('/admin/restore', {
+        method: 'POST',
+        body: JSON.stringify({ confirm: 'RESTORE_ATTENDI', mode: 'replace', backup }),
+      })
+      setMessage(`DB 복구가 완료되었습니다. (${new Date(result.restoredAt).toLocaleString('ko-KR')})`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'DB 복구에 실패했습니다.')
+    } finally {
+      setBackupBusy(false)
     }
   }
 
@@ -201,7 +254,7 @@ export function SchoolSettingsPage() {
             </div>
             <div>
               <p className="text-sm font-medium text-gray-900">현재 설정</p>
-              <p className="text-xs text-gray-400 mt-1">좌표와 반경은 서버 SQLite DB에 저장됩니다.</p>
+              <p className="text-xs text-gray-400 mt-1">좌표와 반경은 서버 MongoDB에 저장됩니다.</p>
             </div>
             <div className="space-y-2 text-sm">
               <Row label="학교" value={form.name} />
@@ -224,6 +277,37 @@ export function SchoolSettingsPage() {
                 </p>
               </div>
             )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-100 flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-gray-100 flex items-center justify-center">
+              <Database size={17} className="text-gray-600" />
+            </div>
+            <div>
+              <h3 className="text-gray-900">운영 관리</h3>
+              <p className="text-sm text-gray-400 mt-0.5">DB 백업 파일을 내려받거나 백업 JSON으로 복구합니다</p>
+            </div>
+          </div>
+          <div className="p-5 grid sm:grid-cols-2 gap-3">
+            <button onClick={downloadBackup} disabled={backupBusy} className={secondaryButton}>
+              {backupBusy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+              DB 백업 다운로드
+            </button>
+            <label className={`${secondaryButton} cursor-pointer ${backupBusy ? 'opacity-60 pointer-events-none' : ''}`}>
+              <Upload size={14} />
+              DB 백업 복구
+              <input
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(event) => {
+                  restoreBackupFile(event.target.files?.[0])
+                  event.target.value = ''
+                }}
+              />
+            </label>
           </div>
         </div>
       </div>

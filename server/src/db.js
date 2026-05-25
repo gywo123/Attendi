@@ -7,6 +7,18 @@ let client
 let database
 let bootstrapped = false
 
+export const DATA_COLLECTIONS = [
+  'schools',
+  'classes',
+  'students',
+  'studentApplications',
+  'teachers',
+  'deviceTokens',
+  'qrSessions',
+  'attendanceRecords',
+  'counters',
+]
+
 export async function initDb() {
   if (database) return database
   if (!MONGODB_URI) {
@@ -60,6 +72,11 @@ export async function pingDb() {
 export function col(name) {
   if (!database) throw new Error('Database has not been initialized.')
   return database.collection(name)
+}
+
+export function db() {
+  if (!database) throw new Error('Database has not been initialized.')
+  return database
 }
 
 export async function ensureInitialData() {
@@ -142,4 +159,10 @@ async function syncCounter(name) {
     { $max: { seq: Number(max?.id || 0) } },
     { upsert: true },
   )
+}
+
+export async function syncAllCounters() {
+  for (const name of DATA_COLLECTIONS.filter((item) => item !== 'counters')) {
+    await syncCounter(name)
+  }
 }
