@@ -295,21 +295,15 @@ export function ManualAttendancePage() {
               className="text-sm text-gray-700 bg-transparent focus:outline-none"
             />
           </div>
-          <div className="flex gap-1.5 overflow-x-auto">
+          <select
+            value={classFilter}
+            onChange={(e) => setClassFilter(e.target.value)}
+            className="min-w-36 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm focus:outline-none focus:border-gray-400"
+          >
             {classOptions.map((cls) => (
-              <button
-                key={cls}
-                onClick={() => setClassFilter(cls)}
-                className={`shrink-0 px-3 py-2 rounded-xl text-sm border transition-colors shadow-sm ${
-                  classFilter === cls
-                    ? 'bg-gray-900 text-white border-gray-900'
-                    : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
-                }`}
-              >
-                {cls}
-              </button>
+              <option key={cls} value={cls}>{cls === '전체' ? '전체 반' : cls}</option>
             ))}
-          </div>
+          </select>
         </div>
 
         {/* Stats bar */}

@@ -6,6 +6,7 @@ import {
   Clock,
   XCircle,
   LogOut,
+  FileText,
   QrCode,
   TrendingUp,
   ChevronRight,
@@ -58,7 +59,10 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string; 
   sick: { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', bar: 'bg-rose-500', dot: 'bg-rose-500' },
 }
 
+const DASHBOARD_STATUSES = ['present', 'late', 'absent', 'early', 'excused', 'sick'] as const
+
 type ApiStudentClass = { classId: number; className: string }
+type ApiClass = { id: number; name: string }
 
 type ApiSummary = {
   date: string
@@ -196,30 +200,17 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
         </div>
 
         {/* Class selector */}
-        <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
-          <button
-            onClick={() => setSelectedClassId(null)}
-            className={`shrink-0 px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-              selectedClassId === null
-                ? 'bg-gray-900 text-white border-gray-900'
-                : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
-            }`}
+        <div className="max-w-xs">
+          <select
+            value={selectedClassId ?? 'all'}
+            onChange={(e) => setSelectedClassId(e.target.value === 'all' ? null : Number(e.target.value))}
+            className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm focus:outline-none focus:border-gray-400"
           >
-            전체
-          </button>
-          {classes.map((cls) => (
-            <button
-              key={cls.id}
-              onClick={() => setSelectedClassId(cls.id)}
-              className={`shrink-0 px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                selectedClassId === cls.id
-                  ? 'bg-gray-900 text-white border-gray-900'
-                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
-              }`}
-            >
-              {cls.name}
-            </button>
-          ))}
+            <option value="all">전체 반</option>
+            {classes.map((cls) => (
+              <option key={cls.id} value={cls.id}>{classShort(cls.name)}</option>
+            ))}
+          </select>
         </div>
 
         {error && (
@@ -229,7 +220,7 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
         )}
 
         {/* Stat cards */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
           <StatCard
             label="전체 학생"
             value={stats.total}
@@ -273,7 +264,24 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
             iconBg="bg-blue-100"
             iconColor="text-blue-600"
             highlight="blue"
-            className="col-span-2 md:col-span-1"
+          />
+          <StatCard
+            label="공결"
+            value={stats.excused}
+            unit="명"
+            icon={<FileText size={16} />}
+            iconBg="bg-indigo-100"
+            iconColor="text-indigo-600"
+            highlight="indigo"
+          />
+          <StatCard
+            label="병결"
+            value={stats.sick}
+            unit="명"
+            icon={<AlertCircle size={16} />}
+            iconBg="bg-rose-100"
+            iconColor="text-rose-600"
+            highlight="rose"
           />
         </div>
 
@@ -292,25 +300,16 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
               {/* Progress bar */}
               <div className="space-y-2 mb-5">
                 <div className="flex h-3 rounded-full overflow-hidden bg-gray-100">
-                  <div
-                    className="bg-green-500 transition-all"
-                    style={{ width: `${stats.total ? (stats.present / stats.total) * 100 : 0}%` }}
-                  />
-                  <div
-                    className="bg-amber-400 transition-all"
-                    style={{ width: `${stats.total ? (stats.late / stats.total) * 100 : 0}%` }}
-                  />
-                  <div
-                    className="bg-blue-500 transition-all"
-                    style={{ width: `${stats.total ? (stats.early / stats.total) * 100 : 0}%` }}
-                  />
-                  <div
-                    className="bg-red-500 transition-all"
-                    style={{ width: `${stats.total ? (stats.absent / stats.total) * 100 : 0}%` }}
-                  />
+                  {DASHBOARD_STATUSES.map((status) => (
+                    <div
+                      key={status}
+                      className={`${STATUS_COLORS[status].bar} transition-all`}
+                      style={{ width: `${stats.total ? (stats[status] / stats.total) * 100 : 0}%` }}
+                    />
+                  ))}
                 </div>
                 <div className="flex gap-4 flex-wrap">
-                  {(['present', 'late', 'absent', 'early'] as const).map((s) => (
+                  {DASHBOARD_STATUSES.map((s) => (
                     <div key={s} className="flex items-center gap-1.5">
                       <span className={`w-2.5 h-2.5 rounded-sm ${STATUS_COLORS[s].bar}`} />
                       <span className="text-xs text-gray-500">
@@ -454,7 +453,7 @@ function StatCard({
   icon: ReactNode
   iconBg: string
   iconColor: string
-  highlight?: 'green' | 'amber' | 'red' | 'blue'
+  highlight?: 'green' | 'amber' | 'red' | 'blue' | 'indigo' | 'rose'
   className?: string
 }) {
   const highlightBorder = {
@@ -462,6 +461,8 @@ function StatCard({
     amber: 'border-amber-200',
     red: 'border-red-200',
     blue: 'border-blue-200',
+    indigo: 'border-indigo-200',
+    rose: 'border-rose-200',
   }
   return (
     <div

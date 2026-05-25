@@ -698,6 +698,13 @@ app.get('/api/attendance/summary', authOptional, route(async (req, res) => {
     col('attendanceRecords').find(filter).sort({ verifiedAt: -1, id: -1 }).limit(8).toArray(),
   ])
   const counts = countStatuses(records)
+  const present = counts.present || 0
+  const late = counts.late || 0
+  const earlyLeave = counts.early_leave || 0
+  const excused = counts.excused || 0
+  const sick = counts.sick || 0
+  const explicitAbsent = counts.absent || 0
+  const unresolvedAbsent = Math.max(0, total - present - late - earlyLeave - excused - sick - explicitAbsent)
   const recentScans = await Promise.all(publicDocs(recentRecords).map(withRecentAttendanceNames))
 
   ok(res, {
@@ -705,12 +712,12 @@ app.get('/api/attendance/summary', authOptional, route(async (req, res) => {
     classId,
     summary: {
       total,
-      present: counts.present || 0,
-      late: counts.late || 0,
-      absent: counts.absent || Math.max(0, total - (counts.present || 0) - (counts.late || 0) - (counts.early_leave || 0) - (counts.excused || 0) - (counts.sick || 0)),
-      earlyLeave: counts.early_leave || 0,
-      excused: counts.excused || 0,
-      sick: counts.sick || 0,
+      present,
+      late,
+      absent: explicitAbsent + unresolvedAbsent,
+      earlyLeave,
+      excused,
+      sick,
     },
     recentScans: recentScans.map((row) => ({ ...row, status: toClientStatus(row.status) })),
   })
@@ -743,6 +750,8 @@ app.get('/api/attendance/weekly-summary', authOptional, route(async (req, res) =
       const earlyLeave = counts.early_leave || 0
       const excused = counts.excused || 0
       const sick = counts.sick || 0
+      const explicitAbsent = counts.absent || 0
+      const unresolvedAbsent = Math.max(0, total - present - late - earlyLeave - excused - sick - explicitAbsent)
       const attended = present + late + earlyLeave
       return {
         date,
@@ -753,7 +762,7 @@ app.get('/api/attendance/weekly-summary', authOptional, route(async (req, res) =
         earlyLeave,
         excused,
         sick,
-        absent: counts.absent || Math.max(0, total - attended - excused - sick),
+        absent: explicitAbsent + unresolvedAbsent,
         attended,
         rate: total ? Math.round((attended / total) * 100) : 0,
       }
@@ -986,15 +995,19 @@ async function createMissingAbsences({ date, classId }) {
     const filter = { studentId: student.id, classId: student.classId, date }
     const existing = await col('attendanceRecords').findOne(filter)
     if (existing) continue
-    await insertDoc('attendanceRecords', {
-      ...filter,
-      status: 'absent',
-      memo: '마감 시 자동 결석 처리',
-      verifiedByQr: false,
-      verifiedAt: null,
-      updatedAt: now(),
-    })
-    created += 1
+    try {
+      await insertDoc('attendanceRecords', {
+        ...filter,
+        status: 'absent',
+        memo: '마감 시 자동 결석 처리',
+        verifiedByQr: false,
+        verifiedAt: null,
+        updatedAt: now(),
+      })
+      created += 1
+    } catch (error) {
+      if (!isDuplicate(error)) throw error
+    }
   }
   return created
 }
