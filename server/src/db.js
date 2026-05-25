@@ -5,7 +5,9 @@ import { now } from './time.js'
 
 let client
 let database
+let initPromise
 let bootstrapped = false
+let bootstrapPromise
 
 export const DATA_COLLECTIONS = [
   'schools',
@@ -24,48 +26,65 @@ export const DATA_COLLECTIONS = [
 
 export async function initDb() {
   if (database) return database
+  if (initPromise) return initPromise
   if (!MONGODB_URI) {
     throw new Error('MONGODB_URI environment variable is required.')
   }
 
-  client = new MongoClient(MONGODB_URI, {
-    maxPoolSize: 10,
-    serverSelectionTimeoutMS: 5000,
+  initPromise = (async () => {
+    client = new MongoClient(MONGODB_URI, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 5000,
+    })
+    await client.connect()
+    database = client.db(DB_NAME)
+
+    await Promise.all([
+      col('counters').createIndex({ _id: 1 }, { unique: true }),
+      col('schools').createIndex({ id: 1 }, { unique: true }),
+      col('classes').createIndex({ id: 1 }, { unique: true }),
+      col('students').createIndex({ id: 1 }, { unique: true }),
+      col('students').createIndex({ studentNumber: 1 }, { unique: true }),
+      col('students').createIndex({ email: 1 }),
+      col('studentApplications').createIndex({ id: 1 }, { unique: true }),
+      col('studentApplications').createIndex({ email: 1, status: 1 }),
+      col('teachers').createIndex({ id: 1 }, { unique: true }),
+      col('teachers').createIndex({ email: 1 }, { unique: true }),
+      col('deviceTokens').createIndex({ id: 1 }, { unique: true }),
+      col('deviceTokens').createIndex({ token: 1 }, { unique: true }),
+      col('qrSessions').createIndex({ id: 1 }, { unique: true }),
+      col('qrSessions').createIndex({ tokenHash: 1 }, { unique: true }),
+      col('attendanceRecords').createIndex({ id: 1 }, { unique: true }),
+      col('attendanceRecords').createIndex({ studentId: 1, classId: 1, date: 1 }, { unique: true }),
+      col('attendancePolicies').createIndex({ id: 1 }, { unique: true }),
+      col('classAttendancePolicies').createIndex({ classId: 1 }, { unique: true }),
+      col('attendanceClosures').createIndex({ date: 1, classId: 1 }, { unique: true }),
+    ])
+
+    return database
+  })().catch((error) => {
+    initPromise = null
+    database = null
+    client = null
+    throw error
   })
-  await client.connect()
-  database = client.db(DB_NAME)
 
-  await Promise.all([
-    col('counters').createIndex({ _id: 1 }, { unique: true }),
-    col('schools').createIndex({ id: 1 }, { unique: true }),
-    col('classes').createIndex({ id: 1 }, { unique: true }),
-    col('students').createIndex({ id: 1 }, { unique: true }),
-    col('students').createIndex({ studentNumber: 1 }, { unique: true }),
-    col('students').createIndex({ email: 1 }),
-    col('studentApplications').createIndex({ id: 1 }, { unique: true }),
-    col('studentApplications').createIndex({ email: 1, status: 1 }),
-    col('teachers').createIndex({ id: 1 }, { unique: true }),
-    col('teachers').createIndex({ email: 1 }, { unique: true }),
-    col('deviceTokens').createIndex({ id: 1 }, { unique: true }),
-    col('deviceTokens').createIndex({ token: 1 }, { unique: true }),
-    col('qrSessions').createIndex({ id: 1 }, { unique: true }),
-    col('qrSessions').createIndex({ tokenHash: 1 }, { unique: true }),
-    col('attendanceRecords').createIndex({ id: 1 }, { unique: true }),
-    col('attendanceRecords').createIndex({ studentId: 1, classId: 1, date: 1 }, { unique: true }),
-    col('attendancePolicies').createIndex({ id: 1 }, { unique: true }),
-    col('classAttendancePolicies').createIndex({ classId: 1 }, { unique: true }),
-    col('attendanceClosures').createIndex({ date: 1, classId: 1 }, { unique: true }),
-  ])
-
-  return database
+  return initPromise
 }
 
 export async function ensureDbReady() {
   await initDb()
-  if (!bootstrapped) {
-    await ensureInitialData()
-    bootstrapped = true
+  if (bootstrapped) return database
+  if (!bootstrapPromise) {
+    bootstrapPromise = (async () => {
+      await ensureInitialData()
+      bootstrapped = true
+    })().catch((error) => {
+      bootstrapPromise = null
+      throw error
+    })
   }
+  await bootstrapPromise
   return database
 }
 
