@@ -16,12 +16,14 @@ import {
   Search,
 } from 'lucide-react'
 import { API_BASE_URL, apiFetch } from '../lib/api'
+import { classShort, studentClassOptions, type ClassOption } from '../lib/classes'
 
 type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'excused' | 'sick'
 
 type Record_ = {
   studentId: string
   name: string
+  classId: number
   class: string
   number: number
   date: string
@@ -37,7 +39,6 @@ const DATES = Array.from({ length: 7 }, (_, index) => {
   date.setDate(date.getDate() - index)
   return date.toISOString().slice(0, 10)
 })
-const CLASSES = ['전체', '3-1', '3-2', '2-1', '2-2']
 const STATUS_FILTER = ['전체', '출석', '지각', '결석', '조퇴', '공결', '병결']
 
 const STATUS_CONFIG: Record<AttendanceStatus, { label: string; bg: string; text: string; border: string; icon: ReactNode }> = {
@@ -63,9 +64,9 @@ type ApiAttendanceRow = {
   memo: string | null
 }
 
-function classShort(name: string) {
-  const match = name.match(/(\d+)학년\s*(\d+)반/)
-  return match ? `${match[1]}-${match[2]}` : name
+type ApiStudent = {
+  classId: number
+  className: string
 }
 
 function timeOnly(value: string | null) {
@@ -82,6 +83,7 @@ function mapAttendanceRow(row: ApiAttendanceRow): Record_ {
   return {
     studentId: row.studentNumber,
     name: row.studentName,
+    classId: row.classId,
     class: classShort(row.className),
     number: displayNumber(row.studentNumber),
     date: row.date,
@@ -95,17 +97,40 @@ function mapAttendanceRow(row: ApiAttendanceRow): Record_ {
 
 export function AttendanceRecordsPage() {
   const [records, setRecords] = useState<Record_[]>([])
+  const [classOptions, setClassOptions] = useState<ClassOption[]>([])
   const [dateFilter, setDateFilter] = useState(DATES[0])
-  const [classFilter, setClassFilter] = useState('전체')
+  const [classFilter, setClassFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('전체')
   const [search, setSearch] = useState('')
   const [error, setError] = useState('')
 
   useEffect(() => {
     let ignore = false
+    async function loadClasses() {
+      try {
+        const students = await apiFetch<ApiStudent[]>('/students?includeInactive=true')
+        if (!ignore) setClassOptions(studentClassOptions(students))
+      } catch {
+        if (!ignore) setClassOptions([])
+      }
+    }
+    loadClasses()
+    return () => { ignore = true }
+  }, [])
+
+  useEffect(() => {
+    if (classFilter !== 'all' && !classOptions.some((option) => String(option.id) === classFilter)) {
+      setClassFilter('all')
+    }
+  }, [classFilter, classOptions])
+
+  useEffect(() => {
+    let ignore = false
     async function loadRecords() {
       try {
-        const rows = await apiFetch<ApiAttendanceRow[]>(`/attendance?dateFrom=${dateFilter}&dateTo=${dateFilter}`)
+        const params = new URLSearchParams({ dateFrom: dateFilter, dateTo: dateFilter })
+        if (classFilter !== 'all') params.set('classId', classFilter)
+        const rows = await apiFetch<ApiAttendanceRow[]>(`/attendance?${params.toString()}`)
         if (ignore) return
         setRecords(rows.map(mapAttendanceRow))
         setError('')
@@ -115,15 +140,14 @@ export function AttendanceRecordsPage() {
     }
     loadRecords()
     return () => { ignore = true }
-  }, [dateFilter])
+  }, [dateFilter, classFilter])
 
   const filtered = records.filter((r) => {
     const matchDate = r.date === dateFilter
-    const matchClass = classFilter === '전체' || r.class === classFilter
     const matchStatus =
       statusFilter === '전체' || STATUS_CONFIG[r.status].label === statusFilter
     const matchSearch = !search || r.name.includes(search) || r.studentId.includes(search)
-    return matchDate && matchClass && matchStatus && matchSearch
+    return matchDate && matchStatus && matchSearch
   })
 
   const counts = {
@@ -137,6 +161,7 @@ export function AttendanceRecordsPage() {
 
   const downloadCsv = () => {
     const params = new URLSearchParams({ dateFrom: dateFilter, dateTo: dateFilter })
+    if (classFilter !== 'all') params.set('classId', classFilter)
     window.location.href = `${API_BASE_URL}/attendance/export.csv?${params.toString()}`
   }
 
@@ -181,20 +206,18 @@ export function AttendanceRecordsPage() {
           </div>
 
           {/* Class filter */}
-          <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
-            {CLASSES.map((cls) => (
-              <button
-                key={cls}
-                onClick={() => setClassFilter(cls)}
-                className={`shrink-0 px-3 py-2 rounded-xl text-sm border transition-colors shadow-sm ${
-                  classFilter === cls
-                    ? 'bg-gray-900 text-white border-gray-900'
-                    : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
-                }`}
-              >
-                {cls}
-              </button>
-            ))}
+          <div className="relative sm:min-w-44">
+            <select
+              value={classFilter}
+              onChange={(e) => setClassFilter(e.target.value)}
+              className="w-full pl-3 pr-8 py-2.5 bg-white border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-gray-400 shadow-sm appearance-none cursor-pointer"
+            >
+              <option value="all">전체 반</option>
+              {classOptions.map((cls) => (
+                <option key={cls.id} value={cls.id}>{cls.label}</option>
+              ))}
+            </select>
+            <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
           </div>
 
           {/* Search */}

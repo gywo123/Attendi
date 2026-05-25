@@ -21,6 +21,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react'
 import { apiFetch } from '../lib/api'
 import { TimeInput } from './manual-attendance/time-input'
+import { sortClassLabels } from '../lib/classes'
 
 type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'excused' | 'sick' | 'unset'
 
@@ -157,8 +158,7 @@ export function ManualAttendancePage() {
   const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
   const classOptions = useMemo(() => {
     const classes = Array.from(new Set(records.map((record) => record.class).filter(Boolean)))
-      .sort((a, b) => a.localeCompare(b, 'ko-KR', { numeric: true }))
-    return ['전체', ...classes]
+    return ['전체', ...sortClassLabels(classes)]
   }, [records])
 
   useEffect(() => {

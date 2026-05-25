@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Search,
   Plus,
@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
 import { API_BASE_URL, apiFetch } from '../lib/api'
+import { classShort, sortClassLabels } from '../lib/classes'
 
 export type Student = {
   id: string
@@ -27,8 +28,6 @@ export type Student = {
   email: string
   studentId: string
 }
-
-const CLASSES = ['전체', '3-1', '3-2', '2-1', '2-2']
 
 type StudentStatusFilter = 'all' | 'active' | 'pending' | 'inactive'
 
@@ -48,11 +47,6 @@ type ApiStudentApplication = {
   email: string
   status: 'pending' | 'approved' | 'rejected'
   requestedAt: string
-}
-
-function classShort(name: string) {
-  const match = name.match(/(\d+)학년\s*(\d+)반/)
-  return match ? `${match[1]}-${match[2]}` : name
 }
 
 function displayNumber(studentNumber: string) {
@@ -146,6 +140,15 @@ export function StudentManagementPage() {
     pending: applications.length,
     inactive: students.filter((s) => !s.active).length,
   }
+
+  const classOptions = useMemo(() => {
+    const labels = Array.from(new Set(students.map((student) => student.class).filter(Boolean)))
+    return ['전체', ...sortClassLabels(labels)]
+  }, [students])
+
+  useEffect(() => {
+    if (!classOptions.includes(classFilter)) setClassFilter('전체')
+  }, [classFilter, classOptions])
 
   const toast = (msg: string) => {
     setSuccessMsg(msg)
@@ -358,21 +361,13 @@ export function StudentManagementPage() {
               className="w-full pl-9 pr-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm placeholder-gray-400 focus:outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-300 shadow-sm"
             />
           </div>
-          <div className="flex gap-1.5 overflow-x-auto">
-            {CLASSES.map((cls) => (
-              <button
-                key={cls}
-                onClick={() => setClassFilter(cls)}
-                className={`shrink-0 px-3 py-2 rounded-xl text-sm border transition-colors shadow-sm ${
-                  classFilter === cls
-                    ? 'bg-gray-900 text-white border-gray-900'
-                    : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
-                }`}
-              >
-                {cls}
-              </button>
-            ))}
-          </div>
+          <select
+            value={classFilter}
+            onChange={(e) => setClassFilter(e.target.value)}
+            className="w-full sm:w-40 px-3 py-2.5 bg-white border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-gray-400 shadow-sm"
+          >
+            {classOptions.map((cls) => <option key={cls} value={cls}>{cls}</option>)}
+          </select>
         </div>
 
         {errorMsg && (

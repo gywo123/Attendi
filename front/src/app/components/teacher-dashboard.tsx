@@ -15,6 +15,7 @@ import {
 import { AnimatePresence } from 'motion/react'
 import { ManualAttendanceModal } from './manual-attendance-modal'
 import { apiFetch } from '../lib/api'
+import { classShort, studentClassOptions } from '../lib/classes'
 
 const REFRESH_INTERVAL_MS = 5000
 
@@ -105,27 +106,13 @@ function formatKoreanDate(date: string) {
   }).format(new Date(`${date}T00:00:00`))
 }
 
-function classShort(name: string) {
-  const match = name.match(/(\d+)학년\s*(\d+)반/)
-  return match ? `${match[1]}-${match[2]}` : name
-}
-
 function timeOnly(value?: string) {
   if (!value) return '--:--'
   return new Date(value).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 function classOptionsFromStudents(students: ApiStudentClass[]) {
-  const seen = new Set<number>()
-  return students
-    .filter((student) => student.classId && student.className)
-    .filter((student) => {
-      if (seen.has(student.classId)) return false
-      seen.add(student.classId)
-      return true
-    })
-    .map((student) => ({ id: student.classId, name: student.className }))
-    .sort((a, b) => classShort(a.name).localeCompare(classShort(b.name), 'ko-KR', { numeric: true }))
+  return studentClassOptions(students).map((item) => ({ id: item.id, name: item.name }))
 }
 
 export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }) {

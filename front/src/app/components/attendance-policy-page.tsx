@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { CalendarCheck, Clock, Loader2, Save, ShieldCheck } from 'lucide-react'
 import { apiFetch } from '../lib/api'
+import { studentClassOptions } from '../lib/classes'
 
 type Policy = {
   startTime: string
@@ -13,6 +14,11 @@ type Policy = {
 type ClassRow = {
   id: number
   name: string
+}
+
+type ApiStudent = {
+  classId: number
+  className: string
 }
 
 type ClassPolicy = {
@@ -48,13 +54,13 @@ export function AttendancePolicyPage() {
     let ignore = false
     async function load() {
       try {
-        const [policyPayload, classRows] = await Promise.all([
+        const [policyPayload, students] = await Promise.all([
           apiFetch<{ policy: Policy; classPolicies: ClassPolicy[] }>('/attendance/policy'),
-          apiFetch<ClassRow[]>('/classes'),
+          apiFetch<ApiStudent[]>('/students?includeInactive=true'),
         ])
         if (!ignore) {
           setPolicy(policyPayload.policy)
-          setClasses(classRows)
+          setClasses(studentClassOptions(students).map((item) => ({ id: item.id, name: item.name })))
           setClassPolicies(Object.fromEntries(policyPayload.classPolicies.map((row) => [row.classId, row])))
           setError('')
         }
