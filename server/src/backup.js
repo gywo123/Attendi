@@ -35,7 +35,7 @@ export async function restoreBackup(input, { mode = 'replace' } = {}) {
     if (mode === 'replace') await col(name).deleteMany({})
     if (mode === 'merge') {
       for (const doc of docs) {
-        const filter = name === 'counters' ? { _id: doc._id } : { id: doc.id }
+        const filter = restoreFilter(name, doc)
         await col(name).replaceOne(filter, doc, { upsert: true })
       }
     } else if (docs.length) {
@@ -46,6 +46,14 @@ export async function restoreBackup(input, { mode = 'replace' } = {}) {
 
   await syncAllCounters()
   return { restoredAt: now(), mode, counts }
+}
+
+function restoreFilter(name, doc) {
+  if (name === 'counters') return { _id: doc._id }
+  if (name === 'classAttendancePolicies') return { classId: Number(doc.classId) }
+  if (name === 'attendanceClosures') return { date: doc.date, classId: doc.classId ?? null }
+  if (name === 'attendancePolicies') return { id: Number(doc.id || 1) }
+  return { id: doc.id }
 }
 
 function validateBackup(backup) {

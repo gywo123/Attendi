@@ -16,6 +16,7 @@ import {
   Cpu,
   FileText,
   Settings,
+  CalendarClock,
 } from 'lucide-react'
 import { AuthPage, type AuthUser } from './components/auth-page'
 import { StudentAttendancePage } from './components/student-attendance'
@@ -27,9 +28,10 @@ import { DeviceTokensPage } from './components/device-tokens'
 import { ManualAttendancePage } from './components/manual-attendance-page'
 import { TeacherManagementPage } from './components/teacher-management'
 import { SchoolSettingsPage } from './components/school-settings'
+import { AttendancePolicyPage } from './components/attendance-policy-page'
 import { apiFetch, clearAccessToken, getAccessToken, setAccessToken, type AuthPayload } from './lib/api'
 
-type TeacherTab = 'dashboard' | 'manual' | 'students' | 'teachers' | 'records' | 'devices' | 'settings'
+type TeacherTab = 'dashboard' | 'manual' | 'students' | 'teachers' | 'records' | 'devices' | 'policy' | 'settings'
 
 const TEACHER_TABS: { id: TeacherTab; label: string; Icon: ElementType; adminOnly?: boolean }[] = [
   { id: 'dashboard', label: '대시보드', Icon: LayoutDashboard },
@@ -38,6 +40,7 @@ const TEACHER_TABS: { id: TeacherTab; label: string; Icon: ElementType; adminOnl
   { id: 'teachers',  label: '교사 관리', Icon: Shield },
   { id: 'records',   label: '출석 기록', Icon: ClipboardList },
   { id: 'devices',   label: '기기 관리', Icon: Cpu },
+  { id: 'policy',    label: '출석 정책', Icon: CalendarClock },
   { id: 'settings',  label: 'GPS 설정', Icon: Settings },
 ]
 
@@ -297,6 +300,7 @@ export default function App() {
         {teacherTab === 'teachers' && <TeacherManagementPage />}
         {teacherTab === 'records' && <AttendanceRecordsPage />}
         {teacherTab === 'devices' && <DeviceTokensPage />}
+        {teacherTab === 'policy' && <AttendancePolicyPage />}
         {teacherTab === 'settings' && <SchoolSettingsPage />}
       </main>
 

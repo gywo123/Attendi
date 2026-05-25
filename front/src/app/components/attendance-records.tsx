@@ -10,12 +10,14 @@ import {
   Clock,
   XCircle,
   LogOut,
+  FileText,
+  AlertCircle,
   ChevronDown,
   Search,
 } from 'lucide-react'
 import { API_BASE_URL, apiFetch } from '../lib/api'
 
-type AttendanceStatus = 'present' | 'late' | 'absent' | 'early'
+type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'excused' | 'sick'
 
 type Record_ = {
   studentId: string
@@ -36,13 +38,15 @@ const DATES = Array.from({ length: 7 }, (_, index) => {
   return date.toISOString().slice(0, 10)
 })
 const CLASSES = ['전체', '3-1', '3-2', '2-1', '2-2']
-const STATUS_FILTER = ['전체', '출석', '지각', '결석', '조퇴']
+const STATUS_FILTER = ['전체', '출석', '지각', '결석', '조퇴', '공결', '병결']
 
 const STATUS_CONFIG: Record<AttendanceStatus, { label: string; bg: string; text: string; border: string; icon: ReactNode }> = {
   present: { label: '출석', bg: 'bg-green-50', text: 'text-green-700', border: 'border-green-200', icon: <CheckCircle2 size={11} /> },
   late: { label: '지각', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', icon: <Clock size={11} /> },
   absent: { label: '결석', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', icon: <XCircle size={11} /> },
   early: { label: '조퇴', bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', icon: <LogOut size={11} /> },
+  excused: { label: '공결', bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200', icon: <FileText size={11} /> },
+  sick: { label: '병결', bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', icon: <AlertCircle size={11} /> },
 }
 
 type ApiAttendanceRow = {
@@ -127,6 +131,8 @@ export function AttendanceRecordsPage() {
     late: filtered.filter((r) => r.status === 'late').length,
     absent: filtered.filter((r) => r.status === 'absent').length,
     early: filtered.filter((r) => r.status === 'early').length,
+    excused: filtered.filter((r) => r.status === 'excused').length,
+    sick: filtered.filter((r) => r.status === 'sick').length,
   }
 
   const downloadCsv = () => {
@@ -222,7 +228,7 @@ export function AttendanceRecordsPage() {
         </div>
 
         {/* Summary mini-stats */}
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
           {(Object.entries(counts) as [AttendanceStatus, number][]).map(([s, n]) => {
             const c = STATUS_CONFIG[s]
             return (

@@ -1,6 +1,8 @@
 import { col, insertDoc, publicDoc, publicDocs } from './db.js'
 import { now } from './time.js'
 
+export const ATTENDANCE_STATUSES = ['present', 'late', 'absent', 'early_leave', 'excused', 'sick']
+
 export async function getStudentFromRequest(req) {
   if (req.user?.role === 'student') {
     const student = await getStudentById(req.user.id)
@@ -104,6 +106,85 @@ export function toDbStatus(status) {
   return status === 'early' ? 'early_leave' : String(status)
 }
 
+export async function getAttendancePolicy() {
+  const policy = publicDoc(await col('attendancePolicies').findOne({ id: 1 }))
+  return normalizeAttendancePolicy(policy)
+}
+
+export async function saveAttendancePolicy(input) {
+  const policy = normalizeAttendancePolicy(input)
+  await col('attendancePolicies').updateOne(
+    { id: 1 },
+    { $set: { ...policy, id: 1, updatedAt: now() } },
+    { upsert: true },
+  )
+  return getAttendancePolicy()
+}
+
+export async function getClassAttendancePolicies() {
+  const rows = publicDocs(await col('classAttendancePolicies').find().sort({ classId: 1 }).toArray())
+  return Promise.all(rows.map(async (row) => {
+    const cls = await col('classes').findOne({ id: Number(row.classId) }, { projection: { _id: 0 } })
+    return { ...normalizeClassPolicy(row), className: cls?.name || '' }
+  }))
+}
+
+export async function saveClassAttendancePolicy(classId, input) {
+  const cls = await col('classes').findOne({ id: Number(classId) }, { projection: { _id: 0 } })
+  if (!cls) return null
+  const policy = normalizeClassPolicy({ ...input, classId: cls.id })
+  await col('classAttendancePolicies').updateOne(
+    { classId: cls.id },
+    { $set: { ...policy, updatedAt: now() } },
+    { upsert: true },
+  )
+  return { ...policy, className: cls.name }
+}
+
+export async function deleteClassAttendancePolicy(classId) {
+  await col('classAttendancePolicies').deleteOne({ classId: Number(classId) })
+}
+
+export async function getEffectiveAttendancePolicy(classId) {
+  const [base, classPolicy] = await Promise.all([
+    getAttendancePolicy(),
+    classId ? col('classAttendancePolicies').findOne({ classId: Number(classId) }, { projection: { _id: 0 } }) : null,
+  ])
+  const override = classPolicy ? normalizeClassPolicy(classPolicy) : {}
+  return {
+    ...base,
+    ...(override.startTime ? { startTime: override.startTime } : {}),
+    ...(override.lateAfterTime ? { lateAfterTime: override.lateAfterTime } : {}),
+    ...(override.closeTime ? { closeTime: override.closeTime } : {}),
+    classId: classId ? Number(classId) : null,
+  }
+}
+
+export async function isAttendanceClosed(date, classId) {
+  const targetDate = String(date)
+  const targetClassId = Number(classId)
+  const closure = await col('attendanceClosures').findOne({
+    date: targetDate,
+    $or: [{ classId: targetClassId }, { classId: null }],
+  })
+  return Boolean(closure)
+}
+
+export async function isPastAttendanceCloseTime({ classId, at = new Date() } = {}) {
+  const policy = await getEffectiveAttendancePolicy(classId)
+  return timeInSeoul(at) > policy.closeTime
+}
+
+export async function upsertAttendanceClosure({ date, classId = null, closedBy = null }) {
+  const filter = { date: String(date), classId: classId === null ? null : Number(classId) }
+  await col('attendanceClosures').updateOne(
+    filter,
+    { $set: { ...filter, closedBy, closedAt: now() } },
+    { upsert: true },
+  )
+  return publicDoc(await col('attendanceClosures').findOne(filter))
+}
+
 export function normalizeRole(role) {
   return role === 'admin' ? 'admin' : 'teacher'
 }
@@ -146,10 +227,9 @@ export function extractQrToken(payload) {
   return payload
 }
 
-export function getAttendanceStatus() {
-  const hour = new Date().getHours()
-  const minute = new Date().getMinutes()
-  return hour > 8 || (hour === 8 && minute > 50) ? 'late' : 'present'
+export async function getAttendanceStatus({ classId, at = new Date() } = {}) {
+  const policy = await getEffectiveAttendancePolicy(classId)
+  return timeInSeoul(at) > policy.lateAfterTime ? 'late' : 'present'
 }
 
 export function isFiniteNumber(value) {
@@ -172,4 +252,39 @@ async function withAttendanceNames(row) {
     studentNumber: student?.studentNumber || '',
     className: cls?.name || '',
   }
+}
+
+function normalizeAttendancePolicy(input = {}) {
+  return {
+    id: 1,
+    startTime: input.startTime || '09:00',
+    lateAfterTime: input.lateAfterTime || '09:10',
+    closeTime: input.closeTime || '17:00',
+    autoAbsentEnabled: Boolean(input.autoAbsentEnabled),
+    statuses: ATTENDANCE_STATUSES,
+    updatedAt: input.updatedAt || null,
+  }
+}
+
+function normalizeClassPolicy(input = {}) {
+  return {
+    classId: Number(input.classId),
+    startTime: input.startTime || '',
+    lateAfterTime: input.lateAfterTime || '',
+    closeTime: input.closeTime || '',
+    updatedAt: input.updatedAt || null,
+  }
+}
+
+function timeInSeoul(value) {
+  const date = value instanceof Date ? value : new Date(value)
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Seoul',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date)
+  const hour = parts.find((part) => part.type === 'hour')?.value || '00'
+  const minute = parts.find((part) => part.type === 'minute')?.value || '00'
+  return `${hour}:${minute}`
 }

@@ -22,7 +22,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import { apiFetch } from '../lib/api'
 import { TimeInput } from './manual-attendance/time-input'
 
-type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'unset'
+type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'excused' | 'sick' | 'unset'
 
 type StudentRecord = {
   id: string
@@ -47,6 +47,8 @@ const STATUS_OPTIONS: {
   { value: 'late',    label: '지각', icon: <Clock size={13} />,         activeBg: 'bg-amber-50 border-amber-300 text-amber-700',   dot: 'bg-amber-500' },
   { value: 'absent',  label: '결석', icon: <XCircle size={13} />,       activeBg: 'bg-red-50 border-red-300 text-red-700',         dot: 'bg-red-500'   },
   { value: 'early',   label: '조퇴', icon: <LogOut size={13} />,        activeBg: 'bg-blue-50 border-blue-300 text-blue-700',      dot: 'bg-blue-500'  },
+  { value: 'excused', label: '공결', icon: <FileText size={13} />,      activeBg: 'bg-indigo-50 border-indigo-300 text-indigo-700', dot: 'bg-indigo-500' },
+  { value: 'sick',    label: '병결', icon: <AlertCircle size={13} />,   activeBg: 'bg-rose-50 border-rose-300 text-rose-700',      dot: 'bg-rose-500'  },
 ]
 
 const DEFAULT_TIME = '09:00'
@@ -178,6 +180,8 @@ export function ManualAttendancePage() {
     late:    records.filter((r) => r.status === 'late').length,
     absent:  records.filter((r) => r.status === 'absent').length,
     early:   records.filter((r) => r.status === 'early').length,
+    excused: records.filter((r) => r.status === 'excused').length,
+    sick:    records.filter((r) => r.status === 'sick').length,
     unset:   records.filter((r) => r.status === 'unset').length,
   }
 
@@ -309,13 +313,15 @@ export function ManualAttendancePage() {
         </div>
 
         {/* Stats bar */}
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
           {[
             { label: '전체', value: records.length, color: 'text-gray-700', bg: 'bg-white' },
             { label: '출석', value: counts.present, color: 'text-green-700', bg: 'bg-green-50' },
             { label: '지각', value: counts.late,    color: 'text-amber-700', bg: 'bg-amber-50' },
             { label: '결석', value: counts.absent,  color: 'text-red-700',   bg: 'bg-red-50'   },
             { label: '조퇴', value: counts.early,   color: 'text-blue-700',  bg: 'bg-blue-50'  },
+            { label: '공결', value: counts.excused, color: 'text-indigo-700', bg: 'bg-indigo-50' },
+            { label: '병결', value: counts.sick,    color: 'text-rose-700', bg: 'bg-rose-50' },
           ].map(({ label, value, color, bg }) => (
             <div key={label} className={`${bg} rounded-xl border border-gray-200 px-3 py-2.5 text-center shadow-sm`}>
               <p className={`text-lg font-medium ${color}`}>{value}</p>
@@ -369,6 +375,8 @@ export function ManualAttendancePage() {
               { id: 'late', label: '지각' },
               { id: 'absent', label: '결석' },
               { id: 'early', label: '조퇴' },
+              { id: 'excused', label: '공결' },
+              { id: 'sick', label: '병결' },
             ] as { id: typeof statusFilter; label: string }[]).map(({ id, label }) => (
               <button
                 key={id}

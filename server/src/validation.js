@@ -90,6 +90,14 @@ export function dateKey(value, field = 'date', label = '날짜') {
   return text
 }
 
+export function timeKey(value, field, label) {
+  const text = String(value || '').trim()
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(text)) {
+    throw new ValidationError(`${label}은(는) HH:mm 형식이어야 합니다.`, [{ field, message: 'invalid_time' }])
+  }
+  return text
+}
+
 function cleanString(value, field, label, options) {
   const text = String(value).trim()
   const max = options.max ?? 120

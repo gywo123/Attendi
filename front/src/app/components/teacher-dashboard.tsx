@@ -24,6 +24,8 @@ const EMPTY_STATS = {
   late: 0,
   absent: 0,
   early: 0,
+  excused: 0,
+  sick: 0,
 }
 
 type DashboardStats = typeof EMPTY_STATS
@@ -33,7 +35,7 @@ type RecentItem = {
   class: string
   number: string
   time: string
-  status: 'present' | 'late' | 'absent' | 'early'
+  status: 'present' | 'late' | 'absent' | 'early' | 'excused' | 'sick'
   gps: boolean
 }
 
@@ -42,6 +44,8 @@ const STATUS_LABEL: Record<string, string> = {
   late: '지각',
   absent: '결석',
   early: '조퇴',
+  excused: '공결',
+  sick: '병결',
 }
 
 const STATUS_COLORS: Record<string, { bg: string; text: string; border: string; bar: string; dot: string }> = {
@@ -49,6 +53,8 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string; 
   late: { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', bar: 'bg-amber-400', dot: 'bg-amber-500' },
   absent: { bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', bar: 'bg-red-500', dot: 'bg-red-500' },
   early: { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', bar: 'bg-blue-500', dot: 'bg-blue-500' },
+  excused: { bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200', bar: 'bg-indigo-500', dot: 'bg-indigo-500' },
+  sick: { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', bar: 'bg-rose-500', dot: 'bg-rose-500' },
 }
 
 type ApiStudentClass = { classId: number; className: string }
@@ -56,7 +62,7 @@ type ApiStudentClass = { classId: number; className: string }
 type ApiSummary = {
   date: string
   classId: number | null
-  summary: { total: number; present: number; late: number; absent: number; earlyLeave: number }
+  summary: { total: number; present: number; late: number; absent: number; earlyLeave: number; excused?: number; sick?: number }
   recentScans: {
     studentName: string
     studentNumber?: string
@@ -74,6 +80,8 @@ type WeeklyDay = {
   late: number
   earlyLeave: number
   absent: number
+  excused?: number
+  sick?: number
   attended: number
   rate: number
 }
@@ -156,6 +164,8 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
           late: summary.summary.late,
           absent: summary.summary.absent,
           early: summary.summary.earlyLeave,
+          excused: summary.summary.excused || 0,
+          sick: summary.summary.sick || 0,
         })
         setRecent(summary.recentScans.map((scan) => ({
           name: scan.studentName,

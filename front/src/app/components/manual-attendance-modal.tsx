@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
 
-type AttendanceStatus = 'present' | 'late' | 'absent' | 'early'
+type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'excused' | 'sick'
 
 type UnprocessedStudent = {
   id: string
@@ -76,6 +76,24 @@ const STATUS_OPTIONS: {
     border: 'border-gray-200',
     activeBg: 'bg-blue-50 border-blue-300 text-blue-700',
   },
+  {
+    value: 'excused',
+    label: '공결',
+    icon: <FileText size={13} />,
+    bg: 'bg-white',
+    text: 'text-gray-600',
+    border: 'border-gray-200',
+    activeBg: 'bg-indigo-50 border-indigo-300 text-indigo-700',
+  },
+  {
+    value: 'sick',
+    label: '병결',
+    icon: <AlertCircle size={13} />,
+    bg: 'bg-white',
+    text: 'text-gray-600',
+    border: 'border-gray-200',
+    activeBg: 'bg-rose-50 border-rose-300 text-rose-700',
+  },
 ]
 
 interface Props {
@@ -132,7 +150,7 @@ export function ManualAttendanceModal({
   }
 
   const statusLabel: Record<AttendanceStatus, string> = {
-    present: '출석', late: '지각', absent: '결석', early: '조퇴',
+    present: '출석', late: '지각', absent: '결석', early: '조퇴', excused: '공결', sick: '병결',
   }
 
   const counts = Object.values(entries).reduce(

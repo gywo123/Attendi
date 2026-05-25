@@ -16,6 +16,9 @@ export const DATA_COLLECTIONS = [
   'deviceTokens',
   'qrSessions',
   'attendanceRecords',
+  'attendancePolicies',
+  'classAttendancePolicies',
+  'attendanceClosures',
   'counters',
 ]
 
@@ -49,6 +52,9 @@ export async function initDb() {
     col('qrSessions').createIndex({ tokenHash: 1 }, { unique: true }),
     col('attendanceRecords').createIndex({ id: 1 }, { unique: true }),
     col('attendanceRecords').createIndex({ studentId: 1, classId: 1, date: 1 }, { unique: true }),
+    col('attendancePolicies').createIndex({ id: 1 }, { unique: true }),
+    col('classAttendancePolicies').createIndex({ classId: 1 }, { unique: true }),
+    col('attendanceClosures').createIndex({ date: 1, classId: 1 }, { unique: true }),
   ])
 
   return database
@@ -95,6 +101,19 @@ export async function ensureInitialData() {
     for (const name of ['3학년 1반', '3학년 2반', '2학년 1반', '2학년 2반']) {
       await insertDoc('classes', { name, schoolLocationId: 1, createdAt: now() })
     }
+  }
+
+  if (!await col('attendancePolicies').findOne({ id: 1 })) {
+    await col('attendancePolicies').insertOne({
+      id: 1,
+      startTime: '09:00',
+      lateAfterTime: '09:10',
+      closeTime: '17:00',
+      autoAbsentEnabled: false,
+      statuses: ['present', 'late', 'absent', 'early_leave', 'excused', 'sick'],
+      updatedAt: now(),
+    })
+    await syncCounter('attendancePolicies')
   }
 
   await ensureTeacherInitial('관리자', 'admin@school.kr', 'admin', '')

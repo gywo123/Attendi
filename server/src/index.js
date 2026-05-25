@@ -22,24 +22,33 @@ import {
   requiredEmail,
   requiredNumber,
   requiredString,
+  timeKey,
 } from './validation.js'
 import {
   extractQrToken,
   generateDeviceToken,
   getAttendanceStatus,
+  getAttendancePolicy,
+  getClassAttendancePolicies,
   getDeviceTokenById,
+  getEffectiveAttendancePolicy,
   getSchoolLocation,
   getStudentById,
   getStudentFromRequest,
   getTeacherById,
+  isAttendanceClosed,
   isInsideSchool,
+  isPastAttendanceCloseTime,
   normalizeRole,
   normalizeTeacherStatus,
   readAttendanceRows,
   resolveClassId,
+  saveAttendancePolicy,
+  saveClassAttendancePolicy,
   toClientAttendanceRow,
   toClientStatus,
   toDbStatus,
+  upsertAttendanceClosure,
 } from './domain.js'
 
 const app = express()
@@ -240,6 +249,36 @@ app.post('/api/device/login', route(async (req, res) => {
 
 app.get('/api/classes', authOptional, route(async (_req, res) => {
   ok(res, publicDocs(await col('classes').find().sort({ id: 1 }).toArray()))
+}))
+
+app.get('/api/attendance/policy', authRequired(['teacher', 'admin']), route(async (_req, res) => {
+  const [policy, classPolicies] = await Promise.all([
+    getAttendancePolicy(),
+    getClassAttendancePolicies(),
+  ])
+  ok(res, { policy, classPolicies })
+}))
+
+app.put('/api/attendance/policy', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const body = assertObject(req.body)
+  const policy = await saveAttendancePolicy({
+    startTime: timeKey(body.startTime, 'startTime', '수업 시작 시간'),
+    lateAfterTime: timeKey(body.lateAfterTime, 'lateAfterTime', '지각 기준 시간'),
+    closeTime: timeKey(body.closeTime, 'closeTime', '출석 마감 시간'),
+    autoAbsentEnabled: optionalBoolean(body, 'autoAbsentEnabled', false),
+  })
+  ok(res, policy)
+}))
+
+app.put('/api/classes/:id/attendance-policy', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const body = assertObject(req.body)
+  const policy = await saveClassAttendancePolicy(req.params.id, {
+    startTime: body.startTime ? timeKey(body.startTime, 'startTime', '수업 시작 시간') : '',
+    lateAfterTime: body.lateAfterTime ? timeKey(body.lateAfterTime, 'lateAfterTime', '지각 기준 시간') : '',
+    closeTime: body.closeTime ? timeKey(body.closeTime, 'closeTime', '출석 마감 시간') : '',
+  })
+  if (!policy) return fail(res, 404, 'CLASS_NOT_FOUND', '반을 찾을 수 없습니다.')
+  ok(res, policy)
 }))
 
 app.get('/api/students', authOptional, route(async (req, res) => {
@@ -574,6 +613,12 @@ app.post('/api/qr-sessions', authOptional, route(async (req, res) => {
   const latitude = requiredNumber(body, 'latitude', '위도', { min: -90, max: 90 })
   const longitude = requiredNumber(body, 'longitude', '경도', { min: -180, max: 180 })
   const accuracyMeters = optionalNumber(body, 'accuracyMeters', 'GPS 정확도', { min: 0, max: 10000 })
+  if (await isAttendanceClosed(today(), classId)) {
+    return fail(res, 409, 'ATTENDANCE_CLOSED', '오늘 출석이 마감되어 QR 코드를 발급할 수 없습니다.')
+  }
+  if (await isPastAttendanceCloseTime({ classId })) {
+    return fail(res, 409, 'ATTENDANCE_CLOSED', '출석 가능 시간이 지나 QR 코드를 발급할 수 없습니다.')
+  }
   if (!await isInsideSchool(latitude, longitude)) {
     return fail(res, 422, 'OUT_OF_SCHOOL_AREA', '학교 인증 구역 밖에서는 QR 코드를 발급할 수 없습니다.')
   }
@@ -615,7 +660,13 @@ app.post('/api/qr-sessions/verify', authRequired(['teacher', 'admin', 'device'])
 
   const verifiedAt = now()
   const date = verifiedAt.slice(0, 10)
-  const status = getAttendanceStatus()
+  if (await isAttendanceClosed(date, session.classId)) {
+    return fail(res, 409, 'ATTENDANCE_CLOSED', '이미 마감된 출석입니다.')
+  }
+  if (await isPastAttendanceCloseTime({ classId: session.classId, at: verifiedAt })) {
+    return fail(res, 409, 'ATTENDANCE_CLOSED', '출석 가능 시간이 지난 QR 코드입니다.')
+  }
+  const status = await getAttendanceStatus({ classId: session.classId, at: verifiedAt })
   const existing = await col('attendanceRecords').findOne({ studentId: session.studentId, classId: session.classId, date })
   if (existing) return fail(res, 409, 'DUPLICATE_ATTENDANCE', '이미 출석 처리된 학생입니다.')
 
@@ -656,8 +707,10 @@ app.get('/api/attendance/summary', authOptional, route(async (req, res) => {
       total,
       present: counts.present || 0,
       late: counts.late || 0,
-      absent: Math.max(0, total - (counts.present || 0) - (counts.late || 0) - (counts.early_leave || 0)),
+      absent: counts.absent || Math.max(0, total - (counts.present || 0) - (counts.late || 0) - (counts.early_leave || 0) - (counts.excused || 0) - (counts.sick || 0)),
       earlyLeave: counts.early_leave || 0,
+      excused: counts.excused || 0,
+      sick: counts.sick || 0,
     },
     recentScans: recentScans.map((row) => ({ ...row, status: toClientStatus(row.status) })),
   })
@@ -688,6 +741,8 @@ app.get('/api/attendance/weekly-summary', authOptional, route(async (req, res) =
       const present = counts.present || 0
       const late = counts.late || 0
       const earlyLeave = counts.early_leave || 0
+      const excused = counts.excused || 0
+      const sick = counts.sick || 0
       const attended = present + late + earlyLeave
       return {
         date,
@@ -696,7 +751,9 @@ app.get('/api/attendance/weekly-summary', authOptional, route(async (req, res) =
         present,
         late,
         earlyLeave,
-        absent: Math.max(0, total - attended),
+        excused,
+        sick,
+        absent: counts.absent || Math.max(0, total - attended - excused - sick),
         attended,
         rate: total ? Math.round((attended / total) * 100) : 0,
       }
@@ -727,6 +784,23 @@ app.get('/api/attendance/export.csv', authOptional, route(async (req, res) => {
   res.send(`\uFEFF${csv}`)
 }))
 
+app.post('/api/attendance/close', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const body = assertObject(req.body)
+  const selectedDate = dateKey(body.date || today())
+  const classId = body.classId === undefined || body.classId === null || body.classId === ''
+    ? null
+    : optionalInteger(body, 'classId', '반 ID')
+  const policy = await getEffectiveAttendancePolicy(classId)
+  const autoCreateAbsent = body.autoCreateAbsent === undefined
+    ? Boolean(policy.autoAbsentEnabled)
+    : optionalBoolean(body, 'autoCreateAbsent', Boolean(policy.autoAbsentEnabled))
+  const closure = await upsertAttendanceClosure({ date: selectedDate, classId, closedBy: req.user.id })
+  const createdAbsentCount = autoCreateAbsent
+    ? await createMissingAbsences({ date: selectedDate, classId })
+    : 0
+  ok(res, { closure, createdAbsentCount })
+}))
+
 app.post('/api/attendance/manual', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const selectedDate = body.date ? dateKey(body.date) : today()
@@ -738,7 +812,10 @@ app.post('/api/attendance/manual', authRequired(['teacher', 'admin']), route(asy
     if (!item.studentId || !item.status) continue
     const student = await getStudentById(item.studentId)
     if (!student) continue
-    const status = toDbStatus(enumValue(String(item.status), ['present', 'late', 'absent', 'early', 'early_leave'], 'status', '출석 상태'))
+    if (await isAttendanceClosed(selectedDate, student.classId)) {
+      return fail(res, 409, 'ATTENDANCE_CLOSED', '이미 마감된 날짜 또는 반입니다.')
+    }
+    const status = toDbStatus(enumValue(String(item.status), ['present', 'late', 'absent', 'early', 'early_leave', 'excused', 'sick'], 'status', '출석 상태'))
     const verifiedAt = status === 'absent' ? null : toIsoAtDateTime(selectedDate, item.time)
     const updatedAt = now()
     const filter = { studentId: student.id, classId: student.classId, date: selectedDate }
@@ -899,4 +976,25 @@ function isDuplicate(error) {
 
 function duplicateMessage(error, fallback) {
   return isDuplicate(error) ? '중복된 값' : fallback
+}
+
+async function createMissingAbsences({ date, classId }) {
+  const studentFilter = { isActive: true, ...(classId ? { classId: Number(classId) } : {}) }
+  const students = await col('students').find(studentFilter, { projection: { _id: 0 } }).toArray()
+  let created = 0
+  for (const student of students) {
+    const filter = { studentId: student.id, classId: student.classId, date }
+    const existing = await col('attendanceRecords').findOne(filter)
+    if (existing) continue
+    await insertDoc('attendanceRecords', {
+      ...filter,
+      status: 'absent',
+      memo: '마감 시 자동 결석 처리',
+      verifiedByQr: false,
+      verifiedAt: null,
+      updatedAt: now(),
+    })
+    created += 1
+  }
+  return created
 }
