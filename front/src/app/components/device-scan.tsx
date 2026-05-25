@@ -11,10 +11,14 @@ import {
   Shield,
   ShieldOff,
   Zap,
+  Camera,
+  Lock,
+  RefreshCw,
 } from 'lucide-react'
-import { apiFetch } from '../lib/api'
+import { ApiError, apiFetch } from '../lib/api'
 
 type ScanState = 'idle' | 'success' | 'late' | 'duplicate' | 'expired' | 'error'
+type ScannerStatus = 'checking' | 'starting' | 'active' | 'permission-denied' | 'unsupported' | 'insecure' | 'error'
 
 const RESULT_CONFIG = {
   success: {
@@ -108,12 +112,15 @@ function toRecentScan(result: VerifyResult): RecentScan | null {
 
 export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
   const [scanState, setScanState] = useState<ScanState>('idle')
+  const [scannerStatus, setScannerStatus] = useState<ScannerStatus>('checking')
+  const [scanMessage, setScanMessage] = useState('카메라를 준비하고 있습니다.')
   const [time, setTime] = useState(new Date())
   const [recentScans, setRecentScans] = useState<RecentScan[]>([])
   const [lastScan, setLastScan] = useState<RecentScan | null>(null)
   const [dismissProgress, setDismissProgress] = useState(0)
   const scannerRef = useRef<Html5Qrcode | null>(null)
   const scanBusyRef = useRef(false)
+  const lastDecodedRef = useRef('')
 
   useEffect(() => {
     const iv = setInterval(() => setTime(new Date()), 1000)
@@ -146,53 +153,106 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
   useEffect(() => {
     const id = 'attendi-device-qr-reader'
     let cancelled = false
+    let mountedScanner: Html5Qrcode | null = null
 
     const startScanner = async () => {
       try {
+        setScannerStatus('checking')
+        setScanMessage('카메라 권한과 HTTPS 상태를 확인하고 있습니다.')
+
+        if (!window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+          setScannerStatus('insecure')
+          setScanMessage('카메라 사용을 위해 HTTPS 배포 주소에서 접속해야 합니다.')
+          return
+        }
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+          setScannerStatus('unsupported')
+          setScanMessage('이 브라우저에서는 카메라 스캔을 사용할 수 없습니다.')
+          return
+        }
+
         const scanner = new Html5Qrcode(id)
+        mountedScanner = scanner
         scannerRef.current = scanner
+        setScannerStatus('starting')
+        setScanMessage('카메라 권한을 허용해 주세요.')
+
+        const cameras = await Html5Qrcode.getCameras()
+        if (!cameras.length) {
+          setScannerStatus('unsupported')
+          setScanMessage('사용 가능한 카메라를 찾지 못했습니다.')
+          return
+        }
+        const camera = cameras.find((item) => /back|rear|environment|후면/i.test(item.label)) || cameras[0]
         await scanner.start(
-          { facingMode: 'environment' },
-          { fps: 8, qrbox: { width: 240, height: 240 } },
+          { deviceId: { exact: camera.id } },
+          { fps: 10, qrbox: { width: 240, height: 240 }, aspectRatio: 1 },
           async (decodedText) => {
             if (scanBusyRef.current) return
+            if (lastDecodedRef.current === decodedText) return
             scanBusyRef.current = true
+            lastDecodedRef.current = decodedText
+            scanner.pause(true)
             try {
               const result = await apiFetch<VerifyResult>('/qr-sessions/verify', {
                 method: 'POST',
                 headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
                 body: JSON.stringify({ qrPayload: decodedText }),
               })
-              handleScan(result.status === 'late' ? 'late' : 'success', toRecentScan(result))
+              if (cancelled) return
+              handleScan(result.status === 'late' ? 'late' : 'success', toRecentScan(result), 'QR 코드 인증이 완료되었습니다.')
             } catch (error) {
-              const message = error instanceof Error ? error.message : ''
-              if (message.includes('이미')) handleScan('duplicate')
-              else if (message.includes('만료')) handleScan('expired')
-              else handleScan('error')
+              if (cancelled) return
+              const state = errorToScanState(error)
+              const message = error instanceof Error ? error.message : 'QR 코드를 처리하지 못했습니다.'
+              handleScan(state, null, message)
             } finally {
               window.setTimeout(() => {
+                if (cancelled) return
                 scanBusyRef.current = false
+                lastDecodedRef.current = ''
+                try {
+                  scanner.resume()
+                } catch {
+                  // The scanner may already be stopped when the page is closed or the user logs out.
+                }
               }, 1800)
             }
           },
           () => {},
         )
-      } catch {
-        if (!cancelled) scannerRef.current = null
+        if (!cancelled) {
+          setScannerStatus('active')
+          setScanMessage('QR 코드를 카메라 인식 영역에 비춰주세요.')
+        }
+      } catch (error) {
+        if (!cancelled) {
+          scannerRef.current = null
+          const message = error instanceof Error ? error.message : ''
+          if (/permission|notallowed|denied/i.test(message)) {
+            setScannerStatus('permission-denied')
+            setScanMessage('카메라 권한이 거부되었습니다. 브라우저 주소창의 권한 설정에서 카메라를 허용해 주세요.')
+          } else {
+            setScannerStatus('error')
+            setScanMessage(message || '카메라를 시작하지 못했습니다.')
+          }
+        }
       }
     }
 
     startScanner()
     return () => {
       cancelled = true
-      const scanner = scannerRef.current
+      const scanner = scannerRef.current || mountedScanner
       scannerRef.current = null
       scanner?.stop().catch(() => {})
     }
   }, [accessToken])
 
-  const handleScan = (state: ScanState, scan?: RecentScan | null) => {
+  const handleScan = (state: ScanState, scan?: RecentScan | null, message = '') => {
     setScanState(state)
+    setScanMessage(message)
     const data = scan ?? null
     setLastScan(data)
     if (data && (state === 'success' || state === 'late')) {
@@ -205,6 +265,7 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
 
   const presentCount = recentScans.filter((s) => s.status === 'present').length
   const lateCount = recentScans.filter((s) => s.status === 'late').length
+  const scannerReady = scannerStatus === 'active'
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col select-none overflow-hidden">
@@ -217,7 +278,7 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
           </div>
           <div>
             <p className="text-sm font-medium text-white/90">출석 인식기</p>
-            <p className="text-xs text-white/40">QR 스캔 대기 중</p>
+            <p className="text-xs text-white/40">{scannerReady ? 'QR 스캔 대기 중' : '카메라 준비 필요'}</p>
           </div>
         </div>
 
@@ -255,7 +316,7 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
               }}
             >
               {/* Grid texture */}
-              <div id="attendi-device-qr-reader" className="absolute inset-0 overflow-hidden opacity-35" />
+              <div id="attendi-device-qr-reader" className="absolute inset-0 overflow-hidden" />
 
               {/* Grid texture */}
               <div
@@ -271,6 +332,10 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
                 className="absolute inset-0"
                 style={{ background: 'radial-gradient(ellipse 65% 65% at 50% 50%, transparent 35%, rgba(0,0,0,0.55) 100%)' }}
               />
+
+              {scannerStatus !== 'active' && (
+                <CameraStatus status={scannerStatus} message={scanMessage} />
+              )}
 
               {/* Scan area frame */}
               <div className="absolute inset-0 flex items-center justify-center">
@@ -314,7 +379,7 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
                   className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs"
                   style={{ background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(8px)' }}
                 >
-                  {scanState === 'idle' ? (
+                  {scannerReady && scanState === 'idle' ? (
                     <>
                       <motion.span
                         className="w-1.5 h-1.5 rounded-full bg-green-400"
@@ -325,8 +390,8 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
                     </>
                   ) : (
                     <>
-                      <span className="w-1.5 h-1.5 rounded-full bg-white/40" />
-                      <span className="text-white/50">처리 중</span>
+                      <span className={`w-1.5 h-1.5 rounded-full ${scannerReady ? 'bg-white/40' : 'bg-amber-400'}`} />
+                      <span className="text-white/50">{scannerReady ? '처리 중' : '대기'}</span>
                     </>
                   )}
                 </motion.div>
@@ -342,10 +407,21 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
           {/* Instruction text */}
           <div className="text-center space-y-1">
             <p className="text-sm text-white/60">
-              {scanState === 'idle'
-                ? 'QR 코드를 카메라 인식 영역에 비춰주세요'
-                : 'QR 코드를 처리하고 있습니다...'}
+              {scannerReady
+                ? scanState === 'idle'
+                  ? 'QR 코드를 카메라 인식 영역에 비춰주세요'
+                  : 'QR 코드를 처리하고 있습니다...'
+                : scanMessage}
             </p>
+            {scannerStatus === 'permission-denied' || scannerStatus === 'error' ? (
+              <button
+                onClick={() => window.location.reload()}
+                className="inline-flex items-center gap-1.5 mt-2 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/70 hover:bg-white/10"
+              >
+                <RefreshCw size={12} />
+                다시 시도
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -428,11 +504,45 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
           <ResultOverlay
             state={scanState}
             student={lastScan}
+            message={scanMessage}
             dismissProgress={dismissProgress}
             onDismiss={() => setScanState('idle')}
           />
         )}
       </AnimatePresence>
+    </div>
+  )
+}
+
+function errorToScanState(error: unknown): Exclude<ScanState, 'idle' | 'success' | 'late'> {
+  if (error instanceof ApiError) {
+    if (error.code === 'DUPLICATE_ATTENDANCE') return 'duplicate'
+    if (error.code === 'QR_EXPIRED') return 'expired'
+    return 'error'
+  }
+  return 'error'
+}
+
+function CameraStatus({ status, message }: { status: ScannerStatus; message: string }) {
+  const Icon = status === 'insecure' ? Lock : status === 'checking' || status === 'starting' ? Camera : AlertTriangle
+  const isBusy = status === 'checking' || status === 'starting'
+  return (
+    <div className="absolute inset-0 z-10 flex items-center justify-center bg-slate-950/85 px-8 text-center">
+      <div className="flex max-w-xs flex-col items-center gap-3">
+        <div className="flex h-14 w-14 items-center justify-center rounded-full border border-white/10 bg-white/5">
+          {isBusy ? (
+            <RefreshCw size={24} className="animate-spin text-white/60" />
+          ) : (
+            <Icon size={24} className="text-amber-300" />
+          )}
+        </div>
+        <div>
+          <p className="text-sm font-medium text-white/80">
+            {isBusy ? '카메라 준비 중' : '스캔을 시작할 수 없습니다'}
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-white/45">{message}</p>
+        </div>
+      </div>
     </div>
   )
 }
@@ -457,18 +567,18 @@ function ScanCorner({ pos, active }: { pos: 'tl' | 'tr' | 'bl' | 'br'; active: b
 function ResultOverlay({
   state,
   student,
+  message,
   dismissProgress,
   onDismiss,
 }: {
   state: Exclude<ScanState, 'idle'>
   student: RecentScan | null
+  message: string
   dismissProgress: number
   onDismiss: () => void
 }) {
   const cfg = RESULT_CONFIG[state]
   const Icon = cfg.icon
-
-  const prevTime = '08:42'
 
   return (
     <motion.div
@@ -533,13 +643,13 @@ function ResultOverlay({
             <p className="text-white/50 text-sm">지각 처리 — QR 코드 인증됨</p>
           )}
           {state === 'duplicate' && (
-            <p className="text-white/50 text-sm">최초 인증 시각: 오전 {prevTime}</p>
+            <p className="text-white/50 text-sm">{message || '이미 출석 처리된 학생입니다'}</p>
           )}
           {state === 'expired' && (
-            <p className="text-white/50 text-sm">학생에게 앱을 새로고침하도록 안내하세요</p>
+            <p className="text-white/50 text-sm">{message || '학생에게 앱을 새로고침하도록 안내하세요'}</p>
           )}
           {state === 'error' && (
-            <p className="text-white/50 text-sm">이 시스템의 출석 QR 코드가 아닙니다</p>
+            <p className="text-white/50 text-sm">{message || '이 시스템의 출석 QR 코드가 아닙니다'}</p>
           )}
         </div>
 
