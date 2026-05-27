@@ -12,15 +12,16 @@ import {
   Settings,
 } from 'lucide-react'
 import { QRCode, CircleTimer } from './qr-code'
-import { apiFetch } from '../lib/api'
+import { ApiError, apiFetch } from '../lib/api'
 import type { AuthUser } from './auth-page'
 
-type AttendanceState = 'checking' | 'denied' | 'outside' | 'ready' | 'verified'
+type AttendanceState = 'checking' | 'denied' | 'outside' | 'closed' | 'ready' | 'verified'
 
 const STATE_LABELS: Record<AttendanceState, string> = {
   checking: '위치 확인 중',
   denied: '권한 거부',
   outside: '학교 밖',
+  closed: '출석 마감',
   ready: 'QR 준비됨',
   verified: '출석 완료',
 }
@@ -59,10 +60,9 @@ export function StudentAttendancePage({ user }: { user?: AuthUser }) {
       setStatusText('학교 구역 인증됨')
       setState('ready')
     } catch (error) {
-      const message = error instanceof Error ? error.message : ''
-      if (message.includes('권한')) setState('denied')
-      else setState('outside')
-      setStatusText(message)
+      const nextState = getBlockedState(error)
+      setState(nextState)
+      setStatusText(error instanceof Error ? error.message : '')
     }
   }
 
@@ -119,6 +119,7 @@ export function StudentAttendancePage({ user }: { user?: AuthUser }) {
           {state === 'checking' && <CheckingPanel />}
           {state === 'denied' && <DeniedPanel />}
           {state === 'outside' && <OutsidePanel />}
+          {state === 'closed' && <ClosedPanel statusText={statusText} />}
           {state === 'ready' && (
             <QRReadyPanel
               qrValue={qrValue}
@@ -163,6 +164,13 @@ function GpsStatusBar({ state, statusText }: { state: AttendanceState; statusTex
       label: '학교 구역 밖',
       sub: '학교 인증 반경 밖에서는 QR을 발급할 수 없습니다.',
     },
+    closed: {
+      bg: 'bg-amber-50 border-amber-200',
+      text: 'text-amber-700',
+      dot: 'bg-amber-400',
+      label: '출석 마감',
+      sub: '오늘 출석이 마감되어 QR을 발급할 수 없습니다.',
+    },
     ready: {
       bg: 'bg-green-50 border-green-200',
       text: 'text-green-700',
@@ -180,7 +188,7 @@ function GpsStatusBar({ state, statusText }: { state: AttendanceState; statusTex
   }
   const c = config[state]
   const sub = statusText || c.sub
-  const Icon = state === 'checking' ? Navigation : state === 'denied' ? Lock : state === 'outside' ? MapPin : Shield
+  const Icon = state === 'checking' ? Navigation : state === 'denied' ? Lock : state === 'outside' ? MapPin : state === 'closed' ? AlertCircle : Shield
 
   return (
     <div className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl border ${c.bg} shadow-sm`}>
@@ -193,6 +201,16 @@ function GpsStatusBar({ state, statusText }: { state: AttendanceState; statusTex
       {state === 'checking' && <Loader2 size={14} className="text-gray-400 animate-spin shrink-0" />}
     </div>
   )
+}
+
+function getBlockedState(error: unknown): AttendanceState {
+  if (error instanceof ApiError) {
+    if (error.code === 'ATTENDANCE_CLOSED') return 'closed'
+    if (error.code === 'OUT_OF_SCHOOL_AREA') return 'outside'
+  }
+  const message = error instanceof Error ? error.message : ''
+  if (message.includes('권한')) return 'denied'
+  return 'outside'
 }
 
 function readPosition(): Promise<{ latitude: number; longitude: number; accuracyMeters?: number }> {
@@ -252,6 +270,47 @@ function DeniedPanel() {
           <p>① 설정 앱 열기</p>
           <p>② 개인정보 보호 → 위치 서비스</p>
           <p>③ 이 앱에서 "사용하는 중" 선택</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ClosedPanel({ statusText }: { statusText?: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-10 px-6 gap-5">
+      <div className="relative">
+        <div className="w-16 h-16 rounded-full bg-amber-50 flex items-center justify-center">
+          <Lock size={24} className="text-amber-500" />
+        </div>
+        <div className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-amber-500 flex items-center justify-center">
+          <AlertCircle size={11} className="text-white" />
+        </div>
+      </div>
+      <div className="text-center space-y-1">
+        <p className="font-medium text-gray-900">출석이 마감되었습니다</p>
+        <p className="text-sm text-gray-500">학교 안에 있어도 마감 후에는 QR 코드가 발급되지 않습니다</p>
+      </div>
+      <div className="w-full bg-gray-50 rounded-xl p-4 space-y-3">
+        <div className="flex items-start gap-3">
+          <div className="w-7 h-7 rounded-full bg-amber-100 flex items-center justify-center shrink-0 mt-0.5">
+            <Lock size={13} className="text-amber-600" />
+          </div>
+          <div>
+            <p className="text-xs font-medium text-gray-700">차단 사유</p>
+            <p className="text-sm text-gray-600 mt-0.5">출석 마감</p>
+            <p className="text-xs text-amber-700 mt-0.5">{statusText || 'QR 발급 불가'}</p>
+          </div>
+        </div>
+        <div className="border-t border-gray-200" />
+        <div className="flex items-start gap-3">
+          <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center shrink-0 mt-0.5">
+            <Shield size={13} className="text-blue-600" />
+          </div>
+          <div>
+            <p className="text-xs font-medium text-gray-700">해결 방법</p>
+            <p className="text-sm text-gray-600 mt-0.5">선생님이 출석 정책에서 해당 날짜/반의 마감을 취소해야 합니다</p>
+          </div>
         </div>
       </div>
     </div>
