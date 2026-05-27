@@ -879,11 +879,23 @@ app.post('/api/device-tokens', authRequired(['teacher', 'admin']), route(async (
   ok(res, await getDeviceTokenById(device.id))
 }))
 
+app.patch('/api/device-tokens/:id', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const device = await getDeviceTokenById(req.params.id)
+  if (!device) return fail(res, 404, 'NOT_FOUND', '기기 토큰을 찾을 수 없습니다.')
+  const body = assertObject(req.body)
+  const status = enumValue(String(body.status), ['active', 'inactive'], 'status', '토큰 상태')
+  await col('deviceTokens').updateOne(
+    { id: device.id },
+    { $set: { revokedAt: status === 'inactive' ? now() : null } },
+  )
+  ok(res, await getDeviceTokenById(device.id))
+}))
+
 app.delete('/api/device-tokens/:id', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const device = await getDeviceTokenById(req.params.id)
   if (!device) return fail(res, 404, 'NOT_FOUND', '기기 토큰을 찾을 수 없습니다.')
-  await col('deviceTokens').updateOne({ id: device.id }, { $set: { revokedAt: now() } })
-  ok(res, await getDeviceTokenById(device.id))
+  await col('deviceTokens').deleteOne({ id: device.id })
+  ok(res, { deletedId: device.id })
 }))
 
 app.use((error, req, res, _next) => {

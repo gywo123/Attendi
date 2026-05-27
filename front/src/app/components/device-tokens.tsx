@@ -4,7 +4,6 @@ import {
   Copy,
   Trash2,
   Check,
-  RefreshCw,
   Scan,
   Clock,
   Shield,
@@ -16,7 +15,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react'
 import { apiFetch } from '../lib/api'
 
-type TokenStatus = 'active' | 'revoked' | 'expired'
+type TokenStatus = 'active' | 'inactive'
 
 type DeviceToken = {
   id: string
@@ -59,7 +58,7 @@ function mapDeviceToken(row: ApiDeviceToken): DeviceToken {
     token: row.token,
     createdAt: formatDateTime(row.createdAt) || '',
     lastUsed: formatDateTime(row.lastUsedAt),
-    status: row.revokedAt ? 'revoked' : 'active',
+    status: row.revokedAt ? 'inactive' : 'active',
     usageCount: row.usageCount || 0,
   }
 }
@@ -69,7 +68,7 @@ export function DeviceTokensPage() {
   const [showModal, setShowModal] = useState(false)
   const [generatedResult, setGeneratedResult] = useState<DeviceToken | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
-  const [revokeConfirm, setRevokeConfirm] = useState<string | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -95,14 +94,27 @@ export function DeviceTokensPage() {
     setTimeout(() => setCopied(null), 2000)
   }
 
-  const handleRevoke = async (id: string) => {
+  const handleStatusChange = async (id: string, status: TokenStatus) => {
     try {
-      const revoked = await apiFetch<ApiDeviceToken>(`/device-tokens/${id}`, { method: 'DELETE' })
-      setTokens((prev) => prev.map((t) => (t.id === id ? mapDeviceToken(revoked) : t)))
-      setRevokeConfirm(null)
+      const saved = await apiFetch<ApiDeviceToken>(`/device-tokens/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status }),
+      })
+      setTokens((prev) => prev.map((t) => (t.id === id ? mapDeviceToken(saved) : t)))
       setError('')
     } catch (err) {
-      setError(err instanceof Error ? err.message : '토큰 취소에 실패했습니다.')
+      setError(err instanceof Error ? err.message : '토큰 상태 변경에 실패했습니다.')
+    }
+  }
+
+  const handleDelete = async (id: string) => {
+    try {
+      await apiFetch<{ deletedId: number }>(`/device-tokens/${id}`, { method: 'DELETE' })
+      setTokens((prev) => prev.filter((t) => t.id !== id))
+      setDeleteConfirm(null)
+      setError('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '토큰 삭제에 실패했습니다.')
     }
   }
 
@@ -213,10 +225,11 @@ export function DeviceTokensPage() {
                 key={t.id}
                 token={t}
                 copied={copied}
-                revokeConfirm={revokeConfirm}
+                deleteConfirm={deleteConfirm}
                 onCopy={handleCopy}
-                onRevoke={handleRevoke}
-                onRevokeConfirm={setRevokeConfirm}
+                onStatusChange={handleStatusChange}
+                onDelete={handleDelete}
+                onDeleteConfirm={setDeleteConfirm}
               />
             ))}
           </div>
@@ -251,17 +264,19 @@ export function DeviceTokensPage() {
 function TokenRow({
   token,
   copied,
-  revokeConfirm,
+  deleteConfirm,
   onCopy,
-  onRevoke,
-  onRevokeConfirm,
+  onStatusChange,
+  onDelete,
+  onDeleteConfirm,
 }: {
   token: DeviceToken
   copied: string | null
-  revokeConfirm: string | null
+  deleteConfirm: string | null
   onCopy: (text: string, id: string) => void
-  onRevoke: (id: string) => void
-  onRevokeConfirm: (id: string | null) => void
+  onStatusChange: (id: string, status: TokenStatus) => void
+  onDelete: (id: string) => void
+  onDeleteConfirm: (id: string | null) => void
 }) {
   const isActive = token.status === 'active'
 
@@ -335,34 +350,44 @@ function TokenRow({
         </div>
 
         {/* Actions */}
-        {isActive && (
-          <div className="shrink-0">
-            {revokeConfirm === token.id ? (
-              <div className="flex items-center gap-1.5">
-                <button
-                  onClick={() => onRevoke(token.id)}
-                  className="px-2.5 py-1.5 rounded-lg text-xs bg-red-600 text-white hover:bg-red-700 transition-colors"
-                >
-                  취소 확인
-                </button>
-                <button
-                  onClick={() => onRevokeConfirm(null)}
-                  className="px-2.5 py-1.5 rounded-lg text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
-                >
-                  돌아가기
-                </button>
-              </div>
-            ) : (
+        <div className="shrink-0">
+          {deleteConfirm === token.id ? (
+            <div className="flex items-center gap-1.5">
               <button
-                onClick={() => onRevokeConfirm(token.id)}
+                onClick={() => onDelete(token.id)}
+                className="px-2.5 py-1.5 rounded-lg text-xs bg-red-600 text-white hover:bg-red-700 transition-colors"
+              >
+                삭제 확인
+              </button>
+              <button
+                onClick={() => onDeleteConfirm(null)}
+                className="px-2.5 py-1.5 rounded-lg text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+              >
+                돌아가기
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => onStatusChange(token.id, isActive ? 'inactive' : 'active')}
+                className={`px-2.5 py-1.5 rounded-lg text-xs border transition-colors ${
+                  isActive
+                    ? 'border-gray-200 text-gray-500 hover:border-amber-200 hover:text-amber-700 hover:bg-amber-50'
+                    : 'border-green-200 text-green-700 bg-green-50 hover:bg-green-100'
+                }`}
+              >
+                {isActive ? '비활성화' : '활성화'}
+              </button>
+              <button
+                onClick={() => onDeleteConfirm(token.id)}
                 className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-gray-200 text-gray-500 hover:border-red-200 hover:text-red-600 hover:bg-red-50 transition-colors"
               >
                 <Trash2 size={12} />
-                토큰 취소
+                삭제
               </button>
-            )}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -545,8 +570,7 @@ function GeneratedResultOverlay({
 function StatusBadge({ status }: { status: TokenStatus }) {
   const cfg = {
     active: { bg: 'bg-green-50 border-green-200', text: 'text-green-700', label: '활성', dot: 'bg-green-500' },
-    revoked: { bg: 'bg-gray-100 border-gray-200', text: 'text-gray-500', label: '취소됨', dot: 'bg-gray-400' },
-    expired: { bg: 'bg-amber-50 border-amber-200', text: 'text-amber-700', label: '만료', dot: 'bg-amber-500' },
+    inactive: { bg: 'bg-gray-100 border-gray-200', text: 'text-gray-500', label: '비활성', dot: 'bg-gray-400' },
   }
   const c = cfg[status]
   return (
