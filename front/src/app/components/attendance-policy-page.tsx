@@ -44,7 +44,7 @@ export function AttendancePolicyPage() {
   const [classPolicies, setClassPolicies] = useState<Record<number, ClassPolicy>>({})
   const [closeDate, setCloseDate] = useState(todayString())
   const [closeClassId, setCloseClassId] = useState('')
-  const [autoCreateAbsent, setAutoCreateAbsent] = useState(true)
+  const [autoCreateAbsent, setAutoCreateAbsent] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
@@ -62,6 +62,7 @@ export function AttendancePolicyPage() {
           setPolicy(policyPayload.policy)
           setClasses(studentClassOptions(students).map((item) => ({ id: item.id, name: item.name })))
           setClassPolicies(Object.fromEntries(policyPayload.classPolicies.map((row) => [row.classId, row])))
+          setAutoCreateAbsent(Boolean(policyPayload.policy.autoAbsentEnabled))
           setError('')
         }
       } catch (err) {
@@ -111,7 +112,8 @@ export function AttendancePolicyPage() {
   }
 
   const closeAttendance = async () => {
-    if (!window.confirm('선택한 날짜/반 출석을 마감할까요?')) return
+    const targetLabel = closeClassId ? classes.find((cls) => cls.id === Number(closeClassId))?.name || '선택 반' : '전체 반'
+    if (!window.confirm(`${closeDate} / ${targetLabel} 출석을 마감할까요?\n마감 후에는 QR 발급과 수동 수정이 제한됩니다.`)) return
     setSaving(true)
     setMessage('')
     setError('')
@@ -127,6 +129,28 @@ export function AttendancePolicyPage() {
       setMessage(`출석을 마감했습니다. 자동 결석 ${result.createdAbsentCount}건`)
     } catch (err) {
       setError(err instanceof Error ? err.message : '출석 마감에 실패했습니다.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const reopenAttendance = async () => {
+    const targetLabel = closeClassId ? classes.find((cls) => cls.id === Number(closeClassId))?.name || '선택 반' : '전체 반'
+    if (!window.confirm(`${closeDate} / ${targetLabel} 출석 마감을 취소할까요?\n취소하면 다시 QR 발급과 수동 수정이 가능합니다.`)) return
+    setSaving(true)
+    setMessage('')
+    setError('')
+    try {
+      const result = await apiFetch<{ deletedCount: number }>('/attendance/reopen', {
+        method: 'POST',
+        body: JSON.stringify({
+          date: closeDate,
+          classId: closeClassId ? Number(closeClassId) : null,
+        }),
+      })
+      setMessage(result.deletedCount > 0 ? '출석 마감을 취소했습니다.' : '해당 날짜/반에 마감 기록이 없습니다.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '출석 마감 취소에 실패했습니다.')
     } finally {
       setSaving(false)
     }
@@ -207,8 +231,8 @@ export function AttendancePolicyPage() {
         </section>
 
         <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <SectionHeader icon={<ShieldCheck size={17} />} title="출석 마감" desc="마감된 날짜/반은 QR 발급과 수동 출석 수정이 제한됩니다" />
-          <div className="p-5 grid md:grid-cols-[180px_1fr_auto_auto] gap-3 items-end">
+          <SectionHeader icon={<ShieldCheck size={17} />} title="출석 마감" desc="선택한 날짜/반의 QR 발급과 수동 출석 수정을 잠그거나 다시 열 수 있습니다" />
+          <div className="p-5 grid md:grid-cols-[180px_1fr_auto_auto_auto] gap-3 items-end">
             <label className="space-y-1.5">
               <span className="text-sm font-medium text-gray-700">날짜</span>
               <input type="date" value={closeDate} onChange={(e) => setCloseDate(e.target.value)} className={inputClass} />
@@ -225,6 +249,7 @@ export function AttendancePolicyPage() {
               미처리 자동 결석
             </label>
             <button onClick={closeAttendance} disabled={saving} className={primaryButton}>마감하기</button>
+            <button onClick={reopenAttendance} disabled={saving} className={secondaryButton}>마감 취소</button>
           </div>
         </section>
       </div>

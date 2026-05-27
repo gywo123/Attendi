@@ -185,6 +185,12 @@ export async function upsertAttendanceClosure({ date, classId = null, closedBy =
   return publicDoc(await col('attendanceClosures').findOne(filter))
 }
 
+export async function deleteAttendanceClosure({ date, classId = null }) {
+  const filter = { date: String(date), classId: classId === null ? null : Number(classId) }
+  const result = await col('attendanceClosures').deleteOne(filter)
+  return { ...filter, deletedCount: result.deletedCount || 0 }
+}
+
 export function normalizeRole(role) {
   return role === 'admin' ? 'admin' : 'teacher'
 }

@@ -49,6 +49,7 @@ import {
   toClientStatus,
   toDbStatus,
   upsertAttendanceClosure,
+  deleteAttendanceClosure,
 } from './domain.js'
 
 const app = express()
@@ -808,6 +809,15 @@ app.post('/api/attendance/close', authRequired(['teacher', 'admin']), route(asyn
     ? await createMissingAbsences({ date: selectedDate, classId })
     : 0
   ok(res, { closure, createdAbsentCount })
+}))
+
+app.post('/api/attendance/reopen', authRequired(['teacher', 'admin']), route(async (req, res) => {
+  const body = assertObject(req.body)
+  const selectedDate = dateKey(body.date || today())
+  const classId = body.classId === undefined || body.classId === null || body.classId === ''
+    ? null
+    : optionalInteger(body, 'classId', '반 ID')
+  ok(res, await deleteAttendanceClosure({ date: selectedDate, classId }))
 }))
 
 app.post('/api/attendance/manual', authRequired(['teacher', 'admin']), route(async (req, res) => {
