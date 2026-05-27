@@ -262,8 +262,9 @@ app.get('/api/attendance/policy', authRequired(['teacher', 'admin']), route(asyn
 
 app.put('/api/attendance/policy', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
+  const current = await getAttendancePolicy()
   const policy = await saveAttendancePolicy({
-    startTime: timeKey(body.startTime, 'startTime', '수업 시작 시간'),
+    startTime: body.startTime ? timeKey(body.startTime, 'startTime', '수업 시작 시간') : current.startTime,
     lateAfterTime: timeKey(body.lateAfterTime, 'lateAfterTime', '지각 기준 시간'),
     closeTime: timeKey(body.closeTime, 'closeTime', '출석 마감 시간'),
     autoAbsentEnabled: optionalBoolean(body, 'autoAbsentEnabled', false),
@@ -274,7 +275,6 @@ app.put('/api/attendance/policy', authRequired(['teacher', 'admin']), route(asyn
 app.put('/api/classes/:id/attendance-policy', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const policy = await saveClassAttendancePolicy(req.params.id, {
-    startTime: body.startTime ? timeKey(body.startTime, 'startTime', '수업 시작 시간') : '',
     lateAfterTime: body.lateAfterTime ? timeKey(body.lateAfterTime, 'lateAfterTime', '지각 기준 시간') : '',
     closeTime: body.closeTime ? timeKey(body.closeTime, 'closeTime', '출석 마감 시간') : '',
   })

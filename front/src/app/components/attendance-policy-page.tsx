@@ -5,7 +5,6 @@ import { apiFetch } from '../lib/api'
 import { studentClassOptions } from '../lib/classes'
 
 type Policy = {
-  startTime: string
   lateAfterTime: string
   closeTime: string
   autoAbsentEnabled: boolean
@@ -24,7 +23,6 @@ type ApiStudent = {
 type ClassPolicy = {
   classId: number
   className?: string
-  startTime?: string
   lateAfterTime?: string
   closeTime?: string
 }
@@ -35,7 +33,6 @@ function todayString() {
 
 export function AttendancePolicyPage() {
   const [policy, setPolicy] = useState<Policy>({
-    startTime: '09:00',
     lateAfterTime: '09:10',
     closeTime: '17:00',
     autoAbsentEnabled: false,
@@ -82,7 +79,11 @@ export function AttendancePolicyPage() {
     try {
       const saved = await apiFetch<Policy>('/attendance/policy', {
         method: 'PUT',
-        body: JSON.stringify(policy),
+        body: JSON.stringify({
+          lateAfterTime: policy.lateAfterTime,
+          closeTime: policy.closeTime,
+          autoAbsentEnabled: policy.autoAbsentEnabled,
+        }),
       })
       setPolicy(saved)
       setMessage('기본 출석 정책이 저장되었습니다.')
@@ -100,12 +101,15 @@ export function AttendancePolicyPage() {
     try {
       const saved = await apiFetch<ClassPolicy>(`/classes/${classId}/attendance-policy`, {
         method: 'PUT',
-        body: JSON.stringify(classPolicies[classId] || { classId }),
+        body: JSON.stringify({
+          lateAfterTime: classPolicies[classId]?.lateAfterTime || '',
+          closeTime: classPolicies[classId]?.closeTime || '',
+        }),
       })
       setClassPolicies((prev) => ({ ...prev, [classId]: saved }))
-      setMessage('반별 출석 시간이 저장되었습니다.')
+      setMessage('반별 출석 기준이 저장되었습니다.')
     } catch (err) {
-      setError(err instanceof Error ? err.message : '반별 출석 시간 저장에 실패했습니다.')
+      setError(err instanceof Error ? err.message : '반별 출석 기준 저장에 실패했습니다.')
     } finally {
       setSaving(false)
     }
@@ -178,7 +182,7 @@ export function AttendancePolicyPage() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h1 className="text-gray-900">출석 정책</h1>
-            <p className="text-sm text-gray-500 mt-0.5">지각 기준, 반별 출석 시간, 날짜별 마감을 관리합니다</p>
+            <p className="text-sm text-gray-500 mt-0.5">지각 기준, 출석 마감, 날짜별 마감을 관리합니다</p>
           </div>
           <button onClick={savePolicy} disabled={saving} className={primaryButton}>
             {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
@@ -190,9 +194,8 @@ export function AttendancePolicyPage() {
         {message && <Notice tone="green" text={message} />}
 
         <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <SectionHeader icon={<Clock size={17} />} title="기본 출석 시간" desc="반별 설정이 없을 때 적용되는 기본 시간입니다" />
-          <div className="p-5 grid sm:grid-cols-4 gap-4">
-            <TimeField label="수업 시작" value={policy.startTime} onChange={(v) => setPolicy((p) => ({ ...p, startTime: v }))} />
+          <SectionHeader icon={<Clock size={17} />} title="기본 출석 기준" desc="반별 설정이 없을 때 적용되는 지각과 마감 기준입니다" />
+          <div className="p-5 grid sm:grid-cols-3 gap-4">
             <TimeField label="지각 기준" value={policy.lateAfterTime} onChange={(v) => setPolicy((p) => ({ ...p, lateAfterTime: v }))} />
             <TimeField label="출석 마감" value={policy.closeTime} onChange={(v) => setPolicy((p) => ({ ...p, closeTime: v }))} />
             <label className="flex items-center gap-2 pt-7 text-sm text-gray-700">
@@ -208,19 +211,18 @@ export function AttendancePolicyPage() {
         </section>
 
         <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <SectionHeader icon={<CalendarCheck size={17} />} title="반별 출석 시간" desc="특정 반만 다른 수업 시간과 지각 기준을 적용합니다" />
+          <SectionHeader icon={<CalendarCheck size={17} />} title="반별 출석 기준" desc="특정 반만 다른 지각 기준과 출석 마감을 적용합니다" />
           <div className="divide-y divide-gray-100">
             {classes.length === 0 ? (
               <div className="p-8 text-center text-sm text-gray-400">등록된 반이 없습니다</div>
             ) : classes.map((cls) => {
               const row = classPolicies[cls.id] || { classId: cls.id }
               return (
-                <div key={cls.id} className="p-4 grid lg:grid-cols-[120px_1fr_1fr_1fr_auto] gap-3 items-end">
+                <div key={cls.id} className="p-4 grid lg:grid-cols-[120px_1fr_1fr_auto] gap-3 items-end">
                   <div>
                     <p className="text-sm font-medium text-gray-900">{cls.name}</p>
                     <p className="text-xs text-gray-400">비우면 기본값 사용</p>
                   </div>
-                  <TimeField label="시작" value={row.startTime || ''} placeholder={policy.startTime} onChange={(v) => patchClassPolicy(cls.id, 'startTime', v)} />
                   <TimeField label="지각" value={row.lateAfterTime || ''} placeholder={policy.lateAfterTime} onChange={(v) => patchClassPolicy(cls.id, 'lateAfterTime', v)} />
                   <TimeField label="마감" value={row.closeTime || ''} placeholder={policy.closeTime} onChange={(v) => patchClassPolicy(cls.id, 'closeTime', v)} />
                   <button onClick={() => saveClassPolicy(cls.id)} disabled={saving} className={secondaryButton}>저장</button>
