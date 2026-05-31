@@ -47,7 +47,10 @@ export function encodeClientPayload(value) {
 }
 
 export function signState(payload) {
-  const body = Buffer.from(JSON.stringify({ ...payload, nonce: crypto.randomBytes(16).toString('base64url') }), 'utf8').toString('base64url')
+  const body = Buffer.from(JSON.stringify({
+    ...payload,
+    nonce: payload.nonce || crypto.randomBytes(16).toString('base64url'),
+  }), 'utf8').toString('base64url')
   const sig = crypto.createHmac('sha256', JWT_SECRET).update(body).digest('base64url')
   return `${body}.${sig}`
 }

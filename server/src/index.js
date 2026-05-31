@@ -56,7 +56,9 @@ const app = express()
 const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next)
 const vercelPreviewOrigin = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i
 const localOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/
-const authRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, prefix: 'auth', persistent: true })
+const loginRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, prefix: 'login', persistent: true })
+const signupRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, prefix: 'signup', persistent: true })
+const oauthRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, prefix: 'oauth', persistent: true })
 const writeRateLimit = rateLimit({ windowMs: 60 * 1000, max: 60, prefix: 'write' })
 const publicApiPaths = new Set([
   '/api/health',
@@ -82,10 +84,13 @@ const corsMiddleware = cors({
   optionsSuccessStatus: 204,
 })
 
+app.disable('x-powered-by')
 app.use(corsMiddleware)
 app.options('*', corsMiddleware)
 app.use((_req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
   res.setHeader('Referrer-Policy', 'no-referrer')
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
@@ -130,13 +135,15 @@ app.post('/api/admin/restore', authRequired(['admin']), route(async (req, res) =
   ok(res, result)
 }))
 
-app.get('/api/auth/google', authRateLimit, (req, res) => {
+app.get('/api/auth/google', oauthRateLimit, (req, res) => {
   const role = req.query.role === 'teacher' ? 'teacher' : 'student'
 
   if (!GOOGLE_CLIENT_ID) {
     return fail(res, 500, 'GOOGLE_OAUTH_NOT_CONFIGURED', 'GOOGLE_CLIENT_ID가 설정되지 않았습니다.')
   }
 
+  const nonce = crypto.randomBytes(16).toString('base64url')
+  setOAuthNonceCookie(res, nonce)
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
     redirect_uri: GOOGLE_REDIRECT_URI,
@@ -144,7 +151,7 @@ app.get('/api/auth/google', authRateLimit, (req, res) => {
     scope: 'openid email profile',
     access_type: 'offline',
     prompt: 'select_account',
-    state: signState({ role }),
+    state: signState({ role, nonce }),
   })
 
   res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
@@ -153,9 +160,12 @@ app.get('/api/auth/google', authRateLimit, (req, res) => {
 app.get('/api/auth/google/callback', route(async (req, res) => {
   const code = req.query.code
   const state = verifyState(req.query.state)
+  const nonce = readCookie(req, 'attendi_oauth_nonce')
   const role = state?.role === 'teacher' ? 'teacher' : 'student'
+  clearOAuthNonceCookie(res)
   if (!code) return res.redirect(`${CLIENT_URL}?auth_error=missing_code`)
   if (!state) return res.redirect(`${CLIENT_URL}?auth_error=invalid_state`)
+  if (!nonce || !state.nonce || nonce !== state.nonce) return res.redirect(`${CLIENT_URL}?auth_error=invalid_state`)
 
   try {
     const googleUser = await exchangeGoogleCode(String(code))
@@ -183,7 +193,7 @@ app.post('/api/auth/logout', (_req, res) => {
   ok(res, { loggedOut: true })
 })
 
-app.post('/api/auth/teacher/login', authRateLimit, route(async (req, res) => {
+app.post('/api/auth/teacher/login', loginRateLimit, route(async (req, res) => {
   const body = assertObject(req.body)
   const email = requiredEmail(body)
   const input = requiredString(body, 'password', '비밀번호', { max: 200 })
@@ -209,7 +219,7 @@ app.post('/api/auth/teacher/login', authRateLimit, route(async (req, res) => {
   ok(res, payload)
 }))
 
-app.post('/api/auth/teacher/signup', authRateLimit, route(async (req, res) => {
+app.post('/api/auth/teacher/signup', signupRateLimit, route(async (req, res) => {
   const body = assertObject(req.body)
   const name = requiredString(body, 'name', '이름')
   const email = requiredEmail(body)
@@ -235,7 +245,7 @@ app.post('/api/auth/teacher/signup', authRateLimit, route(async (req, res) => {
   }
 }))
 
-app.post('/api/auth/student/signup', authRateLimit, route(async (req, res) => {
+app.post('/api/auth/student/signup', signupRateLimit, route(async (req, res) => {
   const body = assertObject(req.body)
   const name = requiredString(body, 'name', '이름')
   const email = requiredEmail(body)
@@ -255,7 +265,7 @@ app.post('/api/auth/student/signup', authRateLimit, route(async (req, res) => {
   ok(res, { name, email, role: 'student', status: 'pending' })
 }))
 
-app.post('/api/device/login', authRateLimit, route(async (req, res) => {
+app.post('/api/device/login', loginRateLimit, route(async (req, res) => {
   const body = assertObject(req.body)
   const token = requiredString(body, 'token', '기기 토큰', { max: 80 })
   const deviceName = optionalString(body, 'deviceName', '기기 이름')
@@ -1055,31 +1065,56 @@ function apiRequestGuard(req, res, next) {
 }
 
 function setAuthCookie(res, token) {
-  const secure = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL)
-  const sameSite = secure ? 'None' : 'Lax'
-  const parts = [
-    `attendi_token=${encodeURIComponent(token)}`,
-    'Path=/',
-    'HttpOnly',
-    `SameSite=${sameSite}`,
-    'Max-Age=28800',
-  ]
-  if (secure) parts.push('Secure')
-  res.setHeader('Set-Cookie', parts.join('; '))
+  setHttpOnlyCookie(res, 'attendi_token', token, 60 * 60 * 8)
 }
 
 function clearAuthCookie(res) {
+  clearHttpOnlyCookie(res, 'attendi_token')
+}
+
+function setOAuthNonceCookie(res, nonce) {
+  setHttpOnlyCookie(res, 'attendi_oauth_nonce', nonce, 10 * 60)
+}
+
+function clearOAuthNonceCookie(res) {
+  clearHttpOnlyCookie(res, 'attendi_oauth_nonce')
+}
+
+function setHttpOnlyCookie(res, name, value, maxAgeSeconds) {
   const secure = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL)
   const sameSite = secure ? 'None' : 'Lax'
   const parts = [
-    'attendi_token=',
+    `${name}=${encodeURIComponent(value)}`,
+    'Path=/',
+    'HttpOnly',
+    `SameSite=${sameSite}`,
+    `Max-Age=${maxAgeSeconds}`,
+  ]
+  if (secure) parts.push('Secure')
+  appendSetCookie(res, parts.join('; '))
+}
+
+function clearHttpOnlyCookie(res, name) {
+  const secure = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL)
+  const sameSite = secure ? 'None' : 'Lax'
+  const parts = [
+    `${name}=`,
     'Path=/',
     'HttpOnly',
     `SameSite=${sameSite}`,
     'Max-Age=0',
   ]
   if (secure) parts.push('Secure')
-  res.setHeader('Set-Cookie', parts.join('; '))
+  appendSetCookie(res, parts.join('; '))
+}
+
+function appendSetCookie(res, value) {
+  const current = res.getHeader('Set-Cookie')
+  if (!current) {
+    res.setHeader('Set-Cookie', value)
+    return
+  }
+  res.setHeader('Set-Cookie', Array.isArray(current) ? [...current, value] : [current, value])
 }
 
 function hasCookie(req, name) {
@@ -1087,6 +1122,14 @@ function hasCookie(req, name) {
     .split(';')
     .map((part) => part.trim())
     .some((part) => part.startsWith(`${name}=`))
+}
+
+function readCookie(req, name) {
+  const found = String(req.headers.cookie || '')
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`))
+  return found ? decodeURIComponent(found.slice(name.length + 1)) : ''
 }
 
 app.use((error, req, res, _next) => {
