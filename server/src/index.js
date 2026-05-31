@@ -9,7 +9,7 @@ import { parseCsv } from './csv.js'
 import { encodeClientPayload, hashPassword, hashToken, verifyPassword } from './security.js'
 import { now, today, toIsoAtDateTime } from './time.js'
 import { createBackup, restoreBackup } from './backup.js'
-import { logError, logInfo, requestContext, requestLogger } from './logger.js'
+import { logError, logInfo, logWarn, requestContext, requestLogger } from './logger.js'
 import {
   ValidationError,
   assertObject,
@@ -58,6 +58,15 @@ const vercelPreviewOrigin = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i
 const localOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/
 const authRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, prefix: 'auth' })
 const writeRateLimit = rateLimit({ windowMs: 60 * 1000, max: 60, prefix: 'write' })
+const publicApiPaths = new Set([
+  '/api/health',
+  '/api/auth/google',
+  '/api/auth/google/callback',
+  '/api/auth/teacher/login',
+  '/api/auth/teacher/signup',
+  '/api/auth/student/signup',
+  '/api/device/login',
+])
 
 const corsMiddleware = cors({
   origin(origin, callback) {
@@ -83,6 +92,7 @@ app.use((_req, res, next) => {
 })
 app.use(requestContext)
 app.use(requestLogger)
+app.use(apiRequestGuard)
 app.use(express.json({ limit: '10mb' }))
 
 app.get('/', (_req, res) => {
@@ -623,7 +633,14 @@ app.post('/api/qr-sessions', writeRateLimit, authRequired(['student']), route(as
   const student = await getStudentFromRequest(req)
   if (!student) return fail(res, 404, 'STUDENT_NOT_FOUND', '출석 처리할 학생을 찾을 수 없습니다.')
   const body = assertObject(req.body)
-  const classId = optionalInteger(body, 'classId', '반 ID', { defaultValue: student.classId })
+  const requestedClassId = body.classId === undefined || body.classId === null || body.classId === ''
+    ? student.classId
+    : optionalInteger(body, 'classId', '반 ID')
+  if (Number(requestedClassId) !== Number(student.classId)) {
+    logWarn('qr_class_scope_blocked', { requestId: req.requestId, userId: req.user.id, requestedClassId, studentClassId: student.classId })
+    return fail(res, 403, 'CLASS_SCOPE_FORBIDDEN', '본인 반으로만 QR 코드를 발급할 수 있습니다.')
+  }
+  const classId = student.classId
   const latitude = requiredNumber(body, 'latitude', '위도', { min: -90, max: 90 })
   const longitude = requiredNumber(body, 'longitude', '경도', { min: -180, max: 180 })
   const accuracyMeters = optionalNumber(body, 'accuracyMeters', 'GPS 정확도', { min: 0, max: 10000 })
@@ -954,6 +971,41 @@ function maskDeviceToken(token) {
   const value = String(token || '')
   if (/^ATD-[A-Z0-9]{4}$/i.test(value)) return `${value.slice(0, 6)}**`
   return value ? 'ATD-••••' : ''
+}
+
+function apiRequestGuard(req, res, next) {
+  if (!req.path.startsWith('/api')) return next()
+
+  const allowedMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])
+  if (!allowedMethods.has(req.method)) {
+    logWarn('api_method_blocked', { requestId: req.requestId, method: req.method, path: req.originalUrl })
+    return fail(res, 405, 'METHOD_NOT_ALLOWED', '허용되지 않은 요청 방식입니다.')
+  }
+
+  if (req.originalUrl.length > 2048 || JSON.stringify(req.query || {}).length > 1000) {
+    logWarn('api_query_blocked', { requestId: req.requestId, method: req.method, path: req.originalUrl })
+    return fail(res, 414, 'REQUEST_TOO_LARGE', '요청 주소 또는 쿼리가 너무 깁니다.')
+  }
+
+  const authHeader = req.headers.authorization
+  if (authHeader && !String(authHeader).startsWith('Bearer ')) {
+    logWarn('api_bad_authorization_header', { requestId: req.requestId, method: req.method, path: req.originalUrl })
+    return fail(res, 400, 'INVALID_AUTH_HEADER', 'Authorization 헤더 형식이 올바르지 않습니다.')
+  }
+
+  const hasBody = Number(req.headers['content-length'] || 0) > 0 || Boolean(req.headers['transfer-encoding'])
+  const contentType = String(req.headers['content-type'] || '').toLowerCase()
+  if (hasBody && ['POST', 'PUT', 'PATCH'].includes(req.method) && !contentType.includes('application/json')) {
+    logWarn('api_content_type_blocked', { requestId: req.requestId, method: req.method, path: req.originalUrl, contentType })
+    return fail(res, 415, 'UNSUPPORTED_MEDIA_TYPE', 'JSON 요청만 허용됩니다.')
+  }
+
+  if (!publicApiPaths.has(req.path) && !authHeader) {
+    logWarn('api_missing_auth_blocked', { requestId: req.requestId, method: req.method, path: req.originalUrl })
+    return fail(res, 401, 'UNAUTHORIZED', '인증이 필요합니다.')
+  }
+
+  next()
 }
 
 app.use((error, req, res, _next) => {
