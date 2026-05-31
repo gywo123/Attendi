@@ -22,6 +22,7 @@ type DeviceToken = {
   name: string
   location: string
   token: string
+  rawToken?: string
   createdAt: string
   lastUsed: string | null
   status: TokenStatus
@@ -30,7 +31,8 @@ type DeviceToken = {
 
 type ApiDeviceToken = {
   id: number
-  token: string
+  token?: string
+  tokenPreview?: string
   deviceName: string | null
   location: string | null
   revokedAt: string | null
@@ -55,7 +57,8 @@ function mapDeviceToken(row: ApiDeviceToken): DeviceToken {
     id: String(row.id),
     name: row.deviceName || '출석 인식기',
     location: row.location || '미지정',
-    token: row.token,
+    token: row.tokenPreview || 'ATD-****',
+    rawToken: row.token,
     createdAt: formatDateTime(row.createdAt) || '',
     lastUsed: formatDateTime(row.lastUsedAt),
     status: row.revokedAt ? 'inactive' : 'active',
@@ -316,24 +319,7 @@ function TokenRow({
             >
               {token.token}
             </code>
-            {isActive && (
-              <button
-                onClick={() => onCopy(token.token, token.id)}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
-              >
-                {copied === token.id ? (
-                  <>
-                    <Check size={12} className="text-green-500" />
-                    복사됨
-                  </>
-                ) : (
-                  <>
-                    <Copy size={12} />
-                    복사
-                  </>
-                )}
-              </button>
-            )}
+            <span className="text-xs text-gray-400">원문은 발급 직후에만 표시</span>
           </div>
 
           {/* Meta */}
@@ -528,10 +514,10 @@ function GeneratedResultOverlay({
           <div className="bg-gray-950 rounded-2xl p-5 text-center space-y-3">
             <p className="text-xs text-gray-500 uppercase tracking-widest">기기 토큰</p>
             <p className="text-3xl font-mono tracking-[0.3em] text-white font-medium">
-              {token.token}
+              {token.rawToken || token.token}
             </p>
             <button
-              onClick={() => onCopy(token.token, `result-${token.id}`)}
+              onClick={() => onCopy(token.rawToken || token.token, `result-${token.id}`)}
               className={`flex items-center gap-2 mx-auto px-4 py-2 rounded-lg text-sm transition-all ${
                 copied === `result-${token.id}`
                   ? 'bg-green-500/20 text-green-400 border border-green-500/30'

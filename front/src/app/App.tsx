@@ -37,7 +37,7 @@ const TEACHER_TABS: { id: TeacherTab; label: string; Icon: ElementType; adminOnl
   { id: 'dashboard', label: '대시보드', Icon: LayoutDashboard },
   { id: 'manual',    label: '수동 출석', Icon: FileText },
   { id: 'students',  label: '학생 관리', Icon: Users },
-  { id: 'teachers',  label: '교사 관리', Icon: Shield },
+  { id: 'teachers',  label: '교사 관리', Icon: Shield, adminOnly: true },
   { id: 'records',   label: '출석 기록', Icon: ClipboardList },
   { id: 'devices',   label: '기기 관리', Icon: Cpu },
   { id: 'policy',    label: '출석 정책', Icon: CalendarClock },

@@ -1,12 +1,25 @@
 import crypto from 'node:crypto'
 import { JWT_SECRET } from './config.js'
 
+const PASSWORD_ITERATIONS = 120000
+const PASSWORD_KEYLEN = 32
+const PASSWORD_DIGEST = 'sha256'
+
 export function hashPassword(value) {
-  return crypto.createHash('sha256').update(`attendi:${value}`).digest('hex')
+  const salt = crypto.randomBytes(16).toString('base64url')
+  const hash = crypto.pbkdf2Sync(String(value), salt, PASSWORD_ITERATIONS, PASSWORD_KEYLEN, PASSWORD_DIGEST).toString('base64url')
+  return `pbkdf2$${PASSWORD_ITERATIONS}$${salt}$${hash}`
 }
 
 export function verifyPassword(input, stored) {
-  return hashPassword(input) === stored
+  const value = String(input)
+  const hash = String(stored || '')
+  if (hash.startsWith('pbkdf2$')) {
+    const [, iterations, salt, expected] = hash.split('$')
+    const actual = crypto.pbkdf2Sync(value, salt, Number(iterations), PASSWORD_KEYLEN, PASSWORD_DIGEST).toString('base64url')
+    return safeEqual(actual, expected)
+  }
+  return safeEqual(legacyPasswordHash(value), hash)
 }
 
 export function hashToken(token) {
@@ -31,4 +44,14 @@ export function verifyJwt(token) {
 
 export function encodeClientPayload(value) {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+}
+
+function legacyPasswordHash(value) {
+  return crypto.createHash('sha256').update(`attendi:${value}`).digest('hex')
+}
+
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a))
+  const right = Buffer.from(String(b))
+  return left.length === right.length && crypto.timingSafeEqual(left, right)
 }

@@ -1,5 +1,6 @@
 import { col, insertDoc, publicDoc, publicDocs } from './db.js'
 import { now } from './time.js'
+import { hashToken } from './security.js'
 
 export const ATTENDANCE_STATUSES = ['present', 'late', 'absent', 'early_leave', 'excused', 'sick']
 
@@ -8,8 +9,7 @@ export async function getStudentFromRequest(req) {
     const student = await getStudentById(req.user.id)
     if (student) return student
   }
-  const student = await col('students').findOne({}, { sort: { id: 1 }, projection: { _id: 0 } })
-  return student ? withClassName(student) : null
+  return null
 }
 
 export async function getSchoolLocation() {
@@ -204,7 +204,7 @@ export async function generateDeviceToken() {
   let value = ''
   do {
     value = `ATD-${Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')}`
-  } while (await col('deviceTokens').findOne({ token: value }))
+  } while (await col('deviceTokens').findOne({ $or: [{ token: value }, { tokenHash: hashToken(value) }] }))
   return value
 }
 

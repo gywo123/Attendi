@@ -3,7 +3,7 @@ import cors from 'cors'
 import crypto from 'node:crypto'
 import { CLIENT_URL, CLIENT_URLS, GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI, PORT, QR_TTL_SECONDS } from './config.js'
 import { col, ensureDbReady, insertDoc, pingDb, publicDoc, publicDocs } from './db.js'
-import { authOptional, authRequired, authResponse, currentAuthPayload, exchangeGoogleCode, upsertGoogleUser } from './auth.js'
+import { authRequired, authResponse, currentAuthPayload, exchangeGoogleCode, upsertGoogleUser } from './auth.js'
 import { csvCell, fail, ok } from './http.js'
 import { parseCsv } from './csv.js'
 import { encodeClientPayload, hashPassword, hashToken, verifyPassword } from './security.js'
@@ -56,6 +56,8 @@ const app = express()
 const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next)
 const vercelPreviewOrigin = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i
 const localOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/
+const authRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, prefix: 'auth' })
+const writeRateLimit = rateLimit({ windowMs: 60 * 1000, max: 60, prefix: 'write' })
 
 const corsMiddleware = cors({
   origin(origin, callback) {
@@ -72,6 +74,13 @@ const corsMiddleware = cors({
 
 app.use(corsMiddleware)
 app.options('*', corsMiddleware)
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  res.setHeader('Cache-Control', 'no-store')
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  next()
+})
 app.use(requestContext)
 app.use(requestLogger)
 app.use(express.json({ limit: '10mb' }))
@@ -156,10 +165,10 @@ app.get('/api/auth/me', authRequired([]), route(async (req, res) => {
   ok(res, await currentAuthPayload(req.user))
 }))
 
-app.post('/api/auth/teacher/login', route(async (req, res) => {
+app.post('/api/auth/teacher/login', authRateLimit, route(async (req, res) => {
   const body = assertObject(req.body)
   const email = requiredEmail(body)
-  const input = requiredString(body, body.password ? 'password' : 'passwordHash', '비밀번호', { max: 200 })
+  const input = requiredString(body, 'password', '비밀번호', { max: 200 })
 
   const teacher = publicDoc(await col('teachers').findOne({ email }))
   if (!teacher || !verifyPassword(input, teacher.passwordHash)) {
@@ -180,7 +189,7 @@ app.post('/api/auth/teacher/login', route(async (req, res) => {
   }))
 }))
 
-app.post('/api/auth/teacher/signup', route(async (req, res) => {
+app.post('/api/auth/teacher/signup', authRateLimit, route(async (req, res) => {
   const body = assertObject(req.body)
   const name = requiredString(body, 'name', '이름')
   const email = requiredEmail(body)
@@ -206,7 +215,7 @@ app.post('/api/auth/teacher/signup', route(async (req, res) => {
   }
 }))
 
-app.post('/api/auth/student/signup', route(async (req, res) => {
+app.post('/api/auth/student/signup', authRateLimit, route(async (req, res) => {
   const body = assertObject(req.body)
   const name = requiredString(body, 'name', '이름')
   const email = requiredEmail(body)
@@ -226,17 +235,21 @@ app.post('/api/auth/student/signup', route(async (req, res) => {
   ok(res, { name, email, role: 'student', status: 'pending' })
 }))
 
-app.post('/api/device/login', route(async (req, res) => {
+app.post('/api/device/login', authRateLimit, route(async (req, res) => {
   const body = assertObject(req.body)
   const token = requiredString(body, 'token', '기기 토큰', { max: 80 })
   const deviceName = optionalString(body, 'deviceName', '기기 이름')
+  const tokenHash = hashToken(token)
 
-  const device = publicDoc(await col('deviceTokens').findOne({ token, revokedAt: null }))
+  const device = publicDoc(await col('deviceTokens').findOne({
+    revokedAt: null,
+    $or: [{ tokenHash }, { token }],
+  }))
   if (!device) return fail(res, 401, 'UNAUTHORIZED', '유효하지 않은 기기 토큰입니다.')
 
   await col('deviceTokens').updateOne(
     { id: device.id },
-    { $set: { deviceName: deviceName || device.deviceName, lastUsedAt: now() } },
+    { $set: { deviceName: deviceName || device.deviceName, tokenHash, token: tokenHash, tokenPreview: maskDeviceToken(token), lastUsedAt: now() } },
   )
 
   ok(res, await authResponse({
@@ -248,7 +261,7 @@ app.post('/api/device/login', route(async (req, res) => {
   }))
 }))
 
-app.get('/api/classes', authOptional, route(async (_req, res) => {
+app.get('/api/classes', authRequired(['teacher', 'admin']), route(async (_req, res) => {
   ok(res, publicDocs(await col('classes').find().sort({ id: 1 }).toArray()))
 }))
 
@@ -282,7 +295,7 @@ app.put('/api/classes/:id/attendance-policy', authRequired(['teacher', 'admin'])
   ok(res, policy)
 }))
 
-app.get('/api/students', authOptional, route(async (req, res) => {
+app.get('/api/students', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const { classId, keyword, includeInactive } = req.query
   const filter = includeInactive === 'true' ? {} : { isActive: true }
   if (classId) filter.classId = Number(classId)
@@ -311,7 +324,7 @@ app.get('/api/students/export.csv', authRequired(['teacher', 'admin']), route(as
   res.send(`\uFEFF${csv}`)
 }))
 
-app.post('/api/students/import', authRequired(['teacher', 'admin']), route(async (req, res) => {
+app.post('/api/students/import', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const rows = Array.isArray(req.body?.students)
     ? req.body.students
@@ -357,7 +370,7 @@ app.post('/api/students/import', authRequired(['teacher', 'admin']), route(async
   ok(res, { importedCount: imported.length, skippedCount: skipped.length, students: imported, skipped })
 }))
 
-app.post('/api/students', authRequired(['teacher', 'admin']), route(async (req, res) => {
+app.post('/api/students', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const name = requiredString(body, 'name', '이름')
   const studentNumber = requiredString(body, 'studentNumber', '학번', { max: 40 })
@@ -498,11 +511,11 @@ app.patch('/api/student-applications/:id', authRequired(['teacher', 'admin']), r
   }
 }))
 
-app.get('/api/teachers', authRequired(['teacher', 'admin']), route(async (_req, res) => {
+app.get('/api/teachers', authRequired(['admin']), route(async (_req, res) => {
   ok(res, publicDocs(await col('teachers').find({}, { projection: { passwordHash: 0 } }).sort({ createdAt: -1, id: -1 }).toArray()))
 }))
 
-app.get('/api/teachers/export.csv', authRequired(['teacher', 'admin']), route(async (_req, res) => {
+app.get('/api/teachers/export.csv', authRequired(['admin']), route(async (_req, res) => {
   const rows = publicDocs(await col('teachers').find({}, { projection: { passwordHash: 0 } }).sort({ createdAt: -1, id: -1 }).toArray())
   const csv = [
     ['name', 'email', 'role', 'school', 'subject', 'status', 'joinedAt'],
@@ -513,7 +526,7 @@ app.get('/api/teachers/export.csv', authRequired(['teacher', 'admin']), route(as
   res.send(`\uFEFF${csv}`)
 }))
 
-app.post('/api/teachers', authRequired(['admin', 'teacher']), route(async (req, res) => {
+app.post('/api/teachers', writeRateLimit, authRequired(['admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const name = requiredString(body, 'name', '이름')
   const email = requiredEmail(body)
@@ -541,7 +554,7 @@ app.post('/api/teachers', authRequired(['admin', 'teacher']), route(async (req, 
   }
 }))
 
-app.patch('/api/teachers/:id', authRequired(['admin', 'teacher']), route(async (req, res) => {
+app.patch('/api/teachers/:id', writeRateLimit, authRequired(['admin']), route(async (req, res) => {
   const teacher = await getTeacherById(req.params.id)
   if (!teacher) return fail(res, 404, 'NOT_FOUND', '교사를 찾을 수 없습니다.')
 
@@ -573,18 +586,18 @@ app.patch('/api/teachers/:id', authRequired(['admin', 'teacher']), route(async (
   }
 }))
 
-app.delete('/api/teachers/:id', authRequired(['admin', 'teacher']), route(async (req, res) => {
+app.delete('/api/teachers/:id', writeRateLimit, authRequired(['admin']), route(async (req, res) => {
   const teacher = await getTeacherById(req.params.id)
   if (!teacher) return fail(res, 404, 'NOT_FOUND', '교사를 찾을 수 없습니다.')
   await col('teachers').deleteOne({ id: teacher.id })
   ok(res, { id: teacher.id, deleted: true })
 }))
 
-app.get('/api/school-location', authOptional, route(async (_req, res) => {
+app.get('/api/school-location', authRequired(['teacher', 'admin']), route(async (_req, res) => {
   ok(res, await getSchoolLocation())
 }))
 
-app.put('/api/school-location', authRequired(['teacher', 'admin']), route(async (req, res) => {
+app.put('/api/school-location', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const name = optionalString(body, 'name', '학교 이름', { defaultValue: '학교' })
   const latitude = requiredNumber(body, 'latitude', '위도', { min: -90, max: 90 })
@@ -599,14 +612,14 @@ app.put('/api/school-location', authRequired(['teacher', 'admin']), route(async 
   ok(res, await getSchoolLocation())
 }))
 
-app.post('/api/location/verify', authOptional, route(async (req, res) => {
+app.post('/api/location/verify', authRequired(['student', 'teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const latitude = requiredNumber(body, 'latitude', '위도', { min: -90, max: 90 })
   const longitude = requiredNumber(body, 'longitude', '경도', { min: -180, max: 180 })
   ok(res, { insideSchoolArea: await isInsideSchool(latitude, longitude) })
 }))
 
-app.post('/api/qr-sessions', authOptional, route(async (req, res) => {
+app.post('/api/qr-sessions', writeRateLimit, authRequired(['student']), route(async (req, res) => {
   const student = await getStudentFromRequest(req)
   if (!student) return fail(res, 404, 'STUDENT_NOT_FOUND', '출석 처리할 학생을 찾을 수 없습니다.')
   const body = assertObject(req.body)
@@ -646,7 +659,7 @@ app.post('/api/qr-sessions', authOptional, route(async (req, res) => {
   })
 }))
 
-app.post('/api/qr-sessions/verify', authRequired(['teacher', 'admin', 'device']), route(async (req, res) => {
+app.post('/api/qr-sessions/verify', writeRateLimit, authRequired(['teacher', 'admin', 'device']), route(async (req, res) => {
   const body = assertObject(req.body)
   const qrPayload = requiredString(body, 'qrPayload', 'QR 코드', { max: 500 })
   const token = extractQrToken(qrPayload)
@@ -689,7 +702,7 @@ app.post('/api/qr-sessions/verify', authRequired(['teacher', 'admin', 'device'])
   ok(res, { result: 'accepted', status: toClientStatus(status), verifiedAt, student })
 }))
 
-app.get('/api/attendance/summary', authOptional, route(async (req, res) => {
+app.get('/api/attendance/summary', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const date = String(req.query.date || today())
   const classId = req.query.classId ? Number(req.query.classId) : null
   const filter = { date, ...(classId ? { classId } : {}) }
@@ -724,7 +737,7 @@ app.get('/api/attendance/summary', authOptional, route(async (req, res) => {
   })
 }))
 
-app.get('/api/attendance/weekly-summary', authOptional, route(async (req, res) => {
+app.get('/api/attendance/weekly-summary', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const targetDate = String(req.query.date || today())
   const classId = req.query.classId ? Number(req.query.classId) : null
   const days = getWeekDatesThrough(targetDate)
@@ -771,11 +784,11 @@ app.get('/api/attendance/weekly-summary', authOptional, route(async (req, res) =
   })
 }))
 
-app.get('/api/attendance', authOptional, route(async (req, res) => {
+app.get('/api/attendance', authRequired(['teacher', 'admin']), route(async (req, res) => {
   ok(res, (await readAttendanceRows(req.query)).map(toClientAttendanceRow))
 }))
 
-app.get('/api/attendance/export.csv', authOptional, route(async (req, res) => {
+app.get('/api/attendance/export.csv', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const rows = await readAttendanceRows(req.query)
   const header = ['date', 'className', 'studentNumber', 'studentName', 'status', 'verifiedByQr', 'verifiedAt', 'memo']
   const body = rows.map((row) => [
@@ -794,7 +807,7 @@ app.get('/api/attendance/export.csv', authOptional, route(async (req, res) => {
   res.send(`\uFEFF${csv}`)
 }))
 
-app.post('/api/attendance/close', authRequired(['teacher', 'admin']), route(async (req, res) => {
+app.post('/api/attendance/close', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const selectedDate = dateKey(body.date || today())
   const classId = body.classId === undefined || body.classId === null || body.classId === ''
@@ -811,7 +824,7 @@ app.post('/api/attendance/close', authRequired(['teacher', 'admin']), route(asyn
   ok(res, { closure, createdAbsentCount })
 }))
 
-app.post('/api/attendance/reopen', authRequired(['teacher', 'admin']), route(async (req, res) => {
+app.post('/api/attendance/reopen', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const selectedDate = dateKey(body.date || today())
   const classId = body.classId === undefined || body.classId === null || body.classId === ''
@@ -820,7 +833,7 @@ app.post('/api/attendance/reopen', authRequired(['teacher', 'admin']), route(asy
   ok(res, await deleteAttendanceClosure({ date: selectedDate, classId }))
 }))
 
-app.post('/api/attendance/manual', authRequired(['teacher', 'admin']), route(async (req, res) => {
+app.post('/api/attendance/manual', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const selectedDate = body.date ? dateKey(body.date) : today()
   const input = Array.isArray(body.records) ? body.records : [body]
@@ -860,26 +873,29 @@ app.post('/api/attendance/manual', authRequired(['teacher', 'admin']), route(asy
 
 app.get('/api/device-tokens', authRequired(['teacher', 'admin']), route(async (_req, res) => {
   const rows = publicDocs(await col('deviceTokens').find().sort({ createdAt: -1, id: -1 }).toArray())
-  ok(res, rows.map((row) => ({ ...row, usageCount: 0 })))
+  ok(res, rows.map((row) => toClientDeviceToken(row)))
 }))
 
-app.post('/api/device-tokens', authRequired(['teacher', 'admin']), route(async (req, res) => {
+app.post('/api/device-tokens', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = req.body ? assertObject(req.body) : {}
   const deviceName = optionalString(body, 'deviceName', '기기 이름', { defaultValue: '새 기기' })
   const location = optionalString(body, 'location', '설치 위치', { defaultValue: '미지정' })
   const token = await generateDeviceToken()
+  const tokenHash = hashToken(token)
   const device = await insertDoc('deviceTokens', {
-    token,
+    token: tokenHash,
+    tokenHash,
+    tokenPreview: maskDeviceToken(token),
     deviceName: String(deviceName),
     location: String(location),
     revokedAt: null,
     lastUsedAt: null,
     createdAt: now(),
   })
-  ok(res, await getDeviceTokenById(device.id))
+  ok(res, toClientDeviceToken(device, { token }))
 }))
 
-app.patch('/api/device-tokens/:id', authRequired(['teacher', 'admin']), route(async (req, res) => {
+app.patch('/api/device-tokens/:id', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const device = await getDeviceTokenById(req.params.id)
   if (!device) return fail(res, 404, 'NOT_FOUND', '기기 토큰을 찾을 수 없습니다.')
   const body = assertObject(req.body)
@@ -888,15 +904,57 @@ app.patch('/api/device-tokens/:id', authRequired(['teacher', 'admin']), route(as
     { id: device.id },
     { $set: { revokedAt: status === 'inactive' ? now() : null } },
   )
-  ok(res, await getDeviceTokenById(device.id))
+  ok(res, toClientDeviceToken(await getDeviceTokenById(device.id)))
 }))
 
-app.delete('/api/device-tokens/:id', authRequired(['teacher', 'admin']), route(async (req, res) => {
+app.delete('/api/device-tokens/:id', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const device = await getDeviceTokenById(req.params.id)
   if (!device) return fail(res, 404, 'NOT_FOUND', '기기 토큰을 찾을 수 없습니다.')
   await col('deviceTokens').deleteOne({ id: device.id })
   ok(res, { deletedId: device.id })
 }))
+
+const rateLimitBuckets = new Map()
+
+function rateLimit({ windowMs, max, prefix }) {
+  return (req, res, next) => {
+    const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim()
+    const key = `${prefix}:${ip}`
+    const timestamp = Date.now()
+    const bucket = rateLimitBuckets.get(key)
+    if (!bucket || bucket.resetAt <= timestamp) {
+      rateLimitBuckets.set(key, { count: 1, resetAt: timestamp + windowMs })
+      return next()
+    }
+    if (bucket.count >= max) {
+      return fail(res, 429, 'RATE_LIMITED', '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.')
+    }
+    bucket.count += 1
+    next()
+  }
+}
+
+function toClientDeviceToken(row, { token } = {}) {
+  const doc = publicDoc(row) || row
+  const tokenPreview = doc.tokenPreview || maskDeviceToken(doc.token)
+  return {
+    id: doc.id,
+    deviceName: doc.deviceName || null,
+    location: doc.location || null,
+    token: token || undefined,
+    tokenPreview,
+    revokedAt: doc.revokedAt || null,
+    lastUsedAt: doc.lastUsedAt || null,
+    createdAt: doc.createdAt || '',
+    usageCount: 0,
+  }
+}
+
+function maskDeviceToken(token) {
+  const value = String(token || '')
+  if (/^ATD-[A-Z0-9]{4}$/i.test(value)) return `${value.slice(0, 6)}**`
+  return value ? 'ATD-••••' : ''
+}
 
 app.use((error, req, res, _next) => {
   if (error?.type === 'entity.parse.failed') {

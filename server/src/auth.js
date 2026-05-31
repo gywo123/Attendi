@@ -79,11 +79,6 @@ export async function upsertGoogleUser({ role, googleUser }) {
   })
 }
 
-export function authOptional(req, _res, next) {
-  req.user = readBearerUser(req)
-  next()
-}
-
 export function authRequired(roles) {
   return async (req, res, next) => {
     try {
