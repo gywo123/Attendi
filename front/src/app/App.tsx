@@ -29,7 +29,7 @@ import { ManualAttendancePage } from './components/manual-attendance-page'
 import { TeacherManagementPage } from './components/teacher-management'
 import { SchoolSettingsPage } from './components/school-settings'
 import { AttendancePolicyPage } from './components/attendance-policy-page'
-import { apiFetch, clearAccessToken, type AuthPayload } from './lib/api'
+import { apiFetch, clearAccessToken, clearApiCache, type AuthPayload } from './lib/api'
 
 type TeacherTab = 'dashboard' | 'manual' | 'students' | 'teachers' | 'records' | 'devices' | 'policy' | 'settings'
 
@@ -60,6 +60,7 @@ export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [teacherTab, setTeacherTab] = useState<TeacherTab>('dashboard')
+  const [visitedTeacherTabs, setVisitedTeacherTabs] = useState<Set<TeacherTab>>(() => new Set(['dashboard']))
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
 
@@ -80,18 +81,36 @@ export default function App() {
     return () => { ignore = true }
   }, [])
 
+  useEffect(() => {
+    const handleCacheClear = () => setVisitedTeacherTabs(new Set([teacherTab]))
+    window.addEventListener('attendi:api-cache-cleared', handleCacheClear)
+    return () => window.removeEventListener('attendi:api-cache-cleared', handleCacheClear)
+  }, [teacherTab])
+
   const handleLogin = (u: AuthUser) => {
     setUser(u)
     setTeacherTab('dashboard')
+    setVisitedTeacherTabs(new Set(['dashboard']))
     setSidebarOpen(false)
   }
 
   const handleLogout = () => {
     apiFetch('/auth/logout', { method: 'POST' }).catch(() => undefined)
     clearAccessToken()
+    clearApiCache()
     setUser(null)
     setProfileOpen(false)
     setSidebarOpen(false)
+  }
+
+  const openTeacherTab = (tab: TeacherTab) => {
+    setTeacherTab(tab)
+    setVisitedTeacherTabs((prev) => {
+      if (prev.has(tab)) return prev
+      const next = new Set(prev)
+      next.add(tab)
+      return next
+    })
   }
 
   if (authLoading) {
@@ -175,7 +194,7 @@ export default function App() {
             {TEACHER_TABS.filter((t) => !t.adminOnly || isAdmin).map(({ id, label, Icon }) => (
               <button
                 key={id}
-                onClick={() => setTeacherTab(id)}
+                onClick={() => openTeacherTab(id)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors ${
                   teacherTab === id
                     ? 'bg-gray-100 text-gray-900 font-medium'
@@ -260,7 +279,7 @@ export default function App() {
               {TEACHER_TABS.filter((t) => !t.adminOnly || isAdmin).map(({ id, label, Icon }) => (
                 <button
                   key={id}
-                  onClick={() => { setTeacherTab(id); setSidebarOpen(false) }}
+                  onClick={() => { openTeacherTab(id); setSidebarOpen(false) }}
                   className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm transition-colors ${
                     teacherTab === id
                       ? 'bg-gray-900 text-white'
@@ -288,16 +307,18 @@ export default function App() {
 
       {/* Main content */}
       <main className="flex-1 pb-16 md:pb-0">
-        {teacherTab === 'dashboard' && (
-          <TeacherDashboardPage onGoToScan={() => setTeacherTab('manual')} />
+        {visitedTeacherTabs.has('dashboard') && (
+          <div hidden={teacherTab !== 'dashboard'}>
+            <TeacherDashboardPage onGoToScan={() => openTeacherTab('manual')} />
+          </div>
         )}
-        {teacherTab === 'manual' && <ManualAttendancePage />}
-        {teacherTab === 'students' && <StudentManagementPage />}
-        {teacherTab === 'teachers' && <TeacherManagementPage />}
-        {teacherTab === 'records' && <AttendanceRecordsPage />}
-        {teacherTab === 'devices' && <DeviceTokensPage />}
-        {teacherTab === 'policy' && <AttendancePolicyPage />}
-        {teacherTab === 'settings' && <SchoolSettingsPage />}
+        {visitedTeacherTabs.has('manual') && <div hidden={teacherTab !== 'manual'}><ManualAttendancePage /></div>}
+        {visitedTeacherTabs.has('students') && <div hidden={teacherTab !== 'students'}><StudentManagementPage /></div>}
+        {visitedTeacherTabs.has('teachers') && <div hidden={teacherTab !== 'teachers'}><TeacherManagementPage /></div>}
+        {visitedTeacherTabs.has('records') && <div hidden={teacherTab !== 'records'}><AttendanceRecordsPage /></div>}
+        {visitedTeacherTabs.has('devices') && <div hidden={teacherTab !== 'devices'}><DeviceTokensPage /></div>}
+        {visitedTeacherTabs.has('policy') && <div hidden={teacherTab !== 'policy'}><AttendancePolicyPage /></div>}
+        {visitedTeacherTabs.has('settings') && <div hidden={teacherTab !== 'settings'}><SchoolSettingsPage /></div>}
       </main>
 
       {/* Mobile bottom nav */}
@@ -305,7 +326,7 @@ export default function App() {
         {TEACHER_TABS.filter((t) => !t.adminOnly || isAdmin).map(({ id, label, Icon }) => (
           <button
             key={id}
-            onClick={() => setTeacherTab(id)}
+            onClick={() => openTeacherTab(id)}
             className={`flex-1 flex flex-col items-center py-2.5 gap-0.5 transition-colors ${
               teacherTab === id ? 'text-gray-900' : 'text-gray-400'
             }`}

@@ -38,27 +38,7 @@ export async function initDb() {
     })
     await client.connect()
     database = client.db(DB_NAME)
-
-    await Promise.all([
-      col('schools').createIndex({ id: 1 }, { unique: true }),
-      col('classes').createIndex({ id: 1 }, { unique: true }),
-      col('students').createIndex({ id: 1 }, { unique: true }),
-      col('students').createIndex({ studentNumber: 1 }, { unique: true }),
-      col('students').createIndex({ email: 1 }),
-      col('studentApplications').createIndex({ id: 1 }, { unique: true }),
-      col('studentApplications').createIndex({ email: 1, status: 1 }),
-      col('teachers').createIndex({ id: 1 }, { unique: true }),
-      col('teachers').createIndex({ email: 1 }, { unique: true }),
-      col('deviceTokens').createIndex({ id: 1 }, { unique: true }),
-      col('deviceTokens').createIndex({ token: 1 }, { unique: true }),
-      col('qrSessions').createIndex({ id: 1 }, { unique: true }),
-      col('qrSessions').createIndex({ tokenHash: 1 }, { unique: true }),
-      col('attendanceRecords').createIndex({ id: 1 }, { unique: true }),
-      col('attendanceRecords').createIndex({ studentId: 1, classId: 1, date: 1 }, { unique: true }),
-      col('attendancePolicies').createIndex({ id: 1 }, { unique: true }),
-      col('classAttendancePolicies').createIndex({ classId: 1 }, { unique: true }),
-      col('attendanceClosures').createIndex({ date: 1, classId: 1 }, { unique: true }),
-    ])
+    ensureIndexesInBackground()
 
     return database
   })().catch((error) => {
@@ -104,6 +84,8 @@ export function db() {
 }
 
 export async function ensureInitialData() {
+  if (await col('appMeta').findOne({ _id: 'initialDataReady' })) return
+
   if (!await col('schools').findOne({ id: 1 })) {
     await col('schools').insertOne({
       id: 1,
@@ -135,6 +117,41 @@ export async function ensureInitialData() {
   }
 
   await ensureTeacherInitial('관리자', 'admin@school.kr', 'admin', '')
+  await col('appMeta').updateOne(
+    { _id: 'initialDataReady' },
+    { $set: { ready: true, updatedAt: now() } },
+    { upsert: true },
+  )
+}
+
+function ensureIndexesInBackground() {
+  Promise.all([
+    col('schools').createIndex({ id: 1 }, { unique: true }),
+    col('classes').createIndex({ id: 1 }, { unique: true }),
+    col('students').createIndex({ id: 1 }, { unique: true }),
+    col('students').createIndex({ studentNumber: 1 }, { unique: true }),
+    col('students').createIndex({ email: 1 }),
+    col('students').createIndex({ classId: 1, isActive: 1 }),
+    col('studentApplications').createIndex({ id: 1 }, { unique: true }),
+    col('studentApplications').createIndex({ email: 1, status: 1 }),
+    col('teachers').createIndex({ id: 1 }, { unique: true }),
+    col('teachers').createIndex({ email: 1 }, { unique: true }),
+    col('deviceTokens').createIndex({ id: 1 }, { unique: true }),
+    col('deviceTokens').createIndex({ token: 1 }, { unique: true }),
+    col('deviceTokens').createIndex({ tokenHash: 1 }),
+    col('qrSessions').createIndex({ id: 1 }, { unique: true }),
+    col('qrSessions').createIndex({ tokenHash: 1 }, { unique: true }),
+    col('attendanceRecords').createIndex({ id: 1 }, { unique: true }),
+    col('attendanceRecords').createIndex({ studentId: 1, classId: 1, date: 1 }, { unique: true }),
+    col('attendanceRecords').createIndex({ date: 1, classId: 1 }),
+    col('attendancePolicies').createIndex({ id: 1 }, { unique: true }),
+    col('classAttendancePolicies').createIndex({ classId: 1 }, { unique: true }),
+    col('attendanceClosures').createIndex({ date: 1, classId: 1 }, { unique: true }),
+    col('rateLimits').createIndex({ key: 1 }, { unique: true }),
+    col('rateLimits').createIndex({ resetAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 }),
+  ]).catch((error) => {
+    console.warn(`MongoDB index setup failed: ${error.message}`)
+  })
 }
 
 export async function nextId(name) {
