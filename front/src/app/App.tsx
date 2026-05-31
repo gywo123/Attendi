@@ -29,7 +29,7 @@ import { ManualAttendancePage } from './components/manual-attendance-page'
 import { TeacherManagementPage } from './components/teacher-management'
 import { SchoolSettingsPage } from './components/school-settings'
 import { AttendancePolicyPage } from './components/attendance-policy-page'
-import { apiFetch, clearAccessToken, getAccessToken, setAccessToken, type AuthPayload } from './lib/api'
+import { apiFetch, clearAccessToken, type AuthPayload } from './lib/api'
 
 type TeacherTab = 'dashboard' | 'manual' | 'students' | 'teachers' | 'records' | 'devices' | 'policy' | 'settings'
 
@@ -66,11 +66,7 @@ export default function App() {
   useEffect(() => {
     let ignore = false
     async function restoreSession() {
-      const token = getAccessToken()
-      if (!token) {
-        setAuthLoading(false)
-        return
-      }
+      clearAccessToken()
       try {
         const payload = await apiFetch<AuthPayload>('/auth/me')
         if (!ignore) setUser(toAuthUser(payload))
@@ -85,13 +81,13 @@ export default function App() {
   }, [])
 
   const handleLogin = (u: AuthUser) => {
-    if (u.token) setAccessToken(u.token)
     setUser(u)
     setTeacherTab('dashboard')
     setSidebarOpen(false)
   }
 
   const handleLogout = () => {
+    apiFetch('/auth/logout', { method: 'POST' }).catch(() => undefined)
     clearAccessToken()
     setUser(null)
     setProfileOpen(false)

@@ -163,8 +163,19 @@ export async function currentAuthPayload(user) {
 function readBearerUser(req) {
   const header = req.headers.authorization || ''
   const token = header.startsWith('Bearer ') ? header.slice(7) : ''
-  if (!token) return null
-  try { return verifyJwt(token) } catch { return null }
+  const cookieToken = readCookie(req, 'attendi_token')
+  const credential = token || cookieToken
+  if (!credential) return null
+  try { return verifyJwt(credential) } catch { return null }
+}
+
+function readCookie(req, name) {
+  const cookie = String(req.headers.cookie || '')
+  const found = cookie
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`))
+  return found ? decodeURIComponent(found.slice(name.length + 1)) : ''
 }
 
 async function refreshSessionUser(user) {

@@ -133,6 +133,7 @@ export function SchoolSettingsPage() {
     try {
       const response = await fetch(`${API_BASE_URL}/admin/backup`, {
         headers: { Authorization: `Bearer ${getAccessToken()}` },
+        credentials: 'include',
       })
       if (!response.ok) {
         const payload = await response.json().catch(() => null)

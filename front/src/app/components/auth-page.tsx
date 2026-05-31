@@ -20,10 +20,8 @@ import { motion, AnimatePresence } from 'motion/react'
 import {
   ApiError,
   apiFetch,
-  decodeAuthPayload,
   loginDevice,
   loginTeacher,
-  setAccessToken,
   startGoogleLogin,
   type AuthPayload,
 } from '../lib/api'
@@ -74,35 +72,51 @@ export function AuthPage({ onLogin }: { onLogin: (user: AuthUser) => void }) {
   const [authNotice, setAuthNotice] = useState('')
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const auth = params.get('auth')
-    const pending = params.get('signup_pending')
-    const authError = params.get('auth_error')
+    let ignore = false
+    async function handleAuthRedirect() {
+      const params = new URLSearchParams(window.location.search)
+      const auth = params.get('auth')
+      const authSuccess = params.get('auth_success')
+      const pending = params.get('signup_pending')
+      const authError = params.get('auth_error')
 
-    if (pending) {
-      const payload = decodeClientPayload<{ name: string; email: string; role?: 'student' | 'teacher' }>(pending)
-      if (payload) {
-        setView({ type: 'pending-approval', name: payload.name, email: payload.email, role: payload.role || 'teacher' })
+      if (pending) {
+        const payload = decodeClientPayload<{ name: string; email: string; role?: 'student' | 'teacher' }>(pending)
+        if (payload && !ignore) {
+          setView({ type: 'pending-approval', name: payload.name, email: payload.email, role: payload.role || 'teacher' })
+          window.history.replaceState({}, '', window.location.pathname)
+          return
+        }
+      }
+
+      if (authError) {
+        if (!ignore) {
+          setAuthNotice(authErrorMessage(authError))
+          setView({ type: 'login', role: 'teacher' })
+        }
         window.history.replaceState({}, '', window.location.pathname)
         return
       }
-    }
 
-    if (authError) {
-      setAuthNotice(authErrorMessage(authError))
-      setView({ type: 'login', role: 'teacher' })
-      window.history.replaceState({}, '', window.location.pathname)
-      return
-    }
+      if (authSuccess) {
+        try {
+          const payload = await apiFetch<AuthPayload>('/auth/me')
+          if (!ignore) onLogin(toAuthUser(payload))
+        } catch (error) {
+          if (!ignore) setAuthNotice(error instanceof Error ? error.message : 'Google 로그인 상태를 확인하지 못했습니다.')
+        } finally {
+          window.history.replaceState({}, '', window.location.pathname)
+        }
+        return
+      }
 
-    if (auth) {
-      const payload = decodeAuthPayload(auth)
-      if (payload) {
-        setAccessToken(payload.accessToken)
-        onLogin(toAuthUser(payload))
+      if (auth) {
+        if (!ignore) setAuthNotice('이전 방식의 로그인 링크입니다. 다시 로그인해 주세요.')
         window.history.replaceState({}, '', window.location.pathname)
       }
     }
+    handleAuthRedirect()
+    return () => { ignore = true }
   }, [onLogin])
 
   const handleRoleChange = (r: AuthRole) => {

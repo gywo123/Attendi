@@ -46,6 +46,24 @@ export function encodeClientPayload(value) {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
 }
 
+export function signState(payload) {
+  const body = Buffer.from(JSON.stringify({ ...payload, nonce: crypto.randomBytes(16).toString('base64url') }), 'utf8').toString('base64url')
+  const sig = crypto.createHmac('sha256', JWT_SECRET).update(body).digest('base64url')
+  return `${body}.${sig}`
+}
+
+export function verifyState(value) {
+  const [body, sig] = String(value || '').split('.')
+  if (!body || !sig) return null
+  const expected = crypto.createHmac('sha256', JWT_SECRET).update(body).digest('base64url')
+  if (!safeEqual(sig, expected)) return null
+  try {
+    return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
 function legacyPasswordHash(value) {
   return crypto.createHash('sha256').update(`attendi:${value}`).digest('hex')
 }

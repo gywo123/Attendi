@@ -2,11 +2,11 @@ import express from 'express'
 import cors from 'cors'
 import crypto from 'node:crypto'
 import { CLIENT_URL, CLIENT_URLS, GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI, PORT, QR_TTL_SECONDS } from './config.js'
-import { col, ensureDbReady, insertDoc, pingDb, publicDoc, publicDocs } from './db.js'
+import { col, ensureDbReady, insertDoc, publicDoc, publicDocs } from './db.js'
 import { authRequired, authResponse, currentAuthPayload, exchangeGoogleCode, upsertGoogleUser } from './auth.js'
 import { csvCell, fail, ok } from './http.js'
 import { parseCsv } from './csv.js'
-import { encodeClientPayload, hashPassword, hashToken, verifyPassword } from './security.js'
+import { encodeClientPayload, hashPassword, hashToken, signState, verifyPassword, verifyState } from './security.js'
 import { now, today, toIsoAtDateTime } from './time.js'
 import { createBackup, restoreBackup } from './backup.js'
 import { logError, logInfo, logWarn, requestContext, requestLogger } from './logger.js'
@@ -56,12 +56,13 @@ const app = express()
 const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next)
 const vercelPreviewOrigin = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i
 const localOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/
-const authRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, prefix: 'auth' })
+const authRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, prefix: 'auth', persistent: true })
 const writeRateLimit = rateLimit({ windowMs: 60 * 1000, max: 60, prefix: 'write' })
 const publicApiPaths = new Set([
   '/api/health',
   '/api/auth/google',
   '/api/auth/google/callback',
+  '/api/auth/logout',
   '/api/auth/teacher/login',
   '/api/auth/teacher/signup',
   '/api/auth/student/signup',
@@ -96,12 +97,11 @@ app.use(apiRequestGuard)
 app.use(express.json({ limit: '10mb' }))
 
 app.get('/', (_req, res) => {
-  ok(res, { service: 'Attendi API', db: 'mongodb', health: '/api/health', time: new Date().toISOString() })
+  ok(res, { service: 'Attendi API', health: '/api/health' })
 })
 
 app.get('/api/health', route(async (_req, res) => {
-  await pingDb()
-  ok(res, { status: 'ok', db: 'mongodb', time: new Date().toISOString() })
+  ok(res, { status: 'ok' })
 }))
 
 app.use('/api', route(async (_req, _res, next) => {
@@ -130,7 +130,7 @@ app.post('/api/admin/restore', authRequired(['admin']), route(async (req, res) =
   ok(res, result)
 }))
 
-app.get('/api/auth/google', (req, res) => {
+app.get('/api/auth/google', authRateLimit, (req, res) => {
   const role = req.query.role === 'teacher' ? 'teacher' : 'student'
 
   if (!GOOGLE_CLIENT_ID) {
@@ -144,7 +144,7 @@ app.get('/api/auth/google', (req, res) => {
     scope: 'openid email profile',
     access_type: 'offline',
     prompt: 'select_account',
-    state: role,
+    state: signState({ role }),
   })
 
   res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
@@ -152,8 +152,10 @@ app.get('/api/auth/google', (req, res) => {
 
 app.get('/api/auth/google/callback', route(async (req, res) => {
   const code = req.query.code
-  const role = req.query.state === 'teacher' ? 'teacher' : 'student'
+  const state = verifyState(req.query.state)
+  const role = state?.role === 'teacher' ? 'teacher' : 'student'
   if (!code) return res.redirect(`${CLIENT_URL}?auth_error=missing_code`)
+  if (!state) return res.redirect(`${CLIENT_URL}?auth_error=invalid_state`)
 
   try {
     const googleUser = await exchangeGoogleCode(String(code))
@@ -164,7 +166,8 @@ app.get('/api/auth/google/callback', route(async (req, res) => {
     if (result.authError) {
       return res.redirect(`${CLIENT_URL}?auth_error=${encodeURIComponent(result.authError)}`)
     }
-    res.redirect(`${CLIENT_URL}?auth=${encodeClientPayload(result)}`)
+    setAuthCookie(res, result.accessToken)
+    res.redirect(`${CLIENT_URL}?auth_success=1`)
   } catch (error) {
     logError('google_oauth_failed', error, { requestId: req.requestId })
     res.redirect(`${CLIENT_URL}?auth_error=google_oauth_failed`)
@@ -174,6 +177,11 @@ app.get('/api/auth/google/callback', route(async (req, res) => {
 app.get('/api/auth/me', authRequired([]), route(async (req, res) => {
   ok(res, await currentAuthPayload(req.user))
 }))
+
+app.post('/api/auth/logout', (_req, res) => {
+  clearAuthCookie(res)
+  ok(res, { loggedOut: true })
+})
 
 app.post('/api/auth/teacher/login', authRateLimit, route(async (req, res) => {
   const body = assertObject(req.body)
@@ -191,12 +199,14 @@ app.post('/api/auth/teacher/login', authRateLimit, route(async (req, res) => {
     return fail(res, 403, 'TEACHER_INACTIVE', '비활성화된 교사 계정입니다.')
   }
 
-  ok(res, await authResponse({
+  const payload = await authResponse({
     id: teacher.id,
     role: teacher.role,
     name: teacher.name,
     email: teacher.email,
-  }))
+  })
+  setAuthCookie(res, payload.accessToken)
+  ok(res, payload)
 }))
 
 app.post('/api/auth/teacher/signup', authRateLimit, route(async (req, res) => {
@@ -262,13 +272,15 @@ app.post('/api/device/login', authRateLimit, route(async (req, res) => {
     { $set: { deviceName: deviceName || device.deviceName, tokenHash, token: tokenHash, tokenPreview: maskDeviceToken(token), lastUsedAt: now() } },
   )
 
-  ok(res, await authResponse({
+  const payload = await authResponse({
     id: device.id,
     role: 'device',
     name: deviceName || device.deviceName || '출석 인식기',
     deviceName: deviceName || device.deviceName || '출석 인식기',
     email: '',
-  }))
+  })
+  setAuthCookie(res, payload.accessToken)
+  ok(res, payload)
 }))
 
 app.get('/api/classes', authRequired(['teacher', 'admin']), route(async (_req, res) => {
@@ -933,22 +945,54 @@ app.delete('/api/device-tokens/:id', writeRateLimit, authRequired(['teacher', 'a
 
 const rateLimitBuckets = new Map()
 
-function rateLimit({ windowMs, max, prefix }) {
-  return (req, res, next) => {
-    const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim()
-    const key = `${prefix}:${ip}`
+function rateLimit({ windowMs, max, prefix, persistent = false }) {
+  return route(async (req, res, next) => {
+    const keys = rateLimitKeys(req, prefix)
     const timestamp = Date.now()
-    const bucket = rateLimitBuckets.get(key)
-    if (!bucket || bucket.resetAt <= timestamp) {
-      rateLimitBuckets.set(key, { count: 1, resetAt: timestamp + windowMs })
+
+    if (persistent) {
+      for (const key of keys) {
+        const bucket = await col('rateLimits').findOne({ key })
+        if (!bucket || Number(bucket.resetAt) <= timestamp) {
+          await col('rateLimits').updateOne(
+            { key },
+            { $set: { key, count: 1, resetAt: timestamp + windowMs, updatedAt: now() } },
+            { upsert: true },
+          )
+          continue
+        }
+        if (Number(bucket.count || 0) >= max) {
+          logWarn('rate_limit_blocked', { requestId: req.requestId, key, path: req.originalUrl })
+          return fail(res, 429, 'RATE_LIMITED', '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.')
+        }
+        await col('rateLimits').updateOne({ key }, { $inc: { count: 1 }, $set: { updatedAt: now() } })
+      }
       return next()
     }
-    if (bucket.count >= max) {
-      return fail(res, 429, 'RATE_LIMITED', '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.')
+
+    for (const key of keys) {
+      const bucket = rateLimitBuckets.get(key)
+      if (!bucket || bucket.resetAt <= timestamp) {
+        rateLimitBuckets.set(key, { count: 1, resetAt: timestamp + windowMs })
+        continue
+      }
+      if (bucket.count >= max) {
+        logWarn('rate_limit_blocked', { requestId: req.requestId, key, path: req.originalUrl })
+        return fail(res, 429, 'RATE_LIMITED', '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.')
+      }
+      bucket.count += 1
     }
-    bucket.count += 1
     next()
-  }
+  })
+}
+
+function rateLimitKeys(req, prefix) {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim()
+  const keys = [`${prefix}:ip:${ip}`]
+  const account = req.body?.email || req.body?.token || req.query?.role || ''
+  const normalizedAccount = String(account).trim().toLowerCase()
+  if (normalizedAccount) keys.push(`${prefix}:account:${hashToken(normalizedAccount)}`)
+  return keys
 }
 
 function toClientDeviceToken(row, { token } = {}) {
@@ -1000,12 +1044,49 @@ function apiRequestGuard(req, res, next) {
     return fail(res, 415, 'UNSUPPORTED_MEDIA_TYPE', 'JSON 요청만 허용됩니다.')
   }
 
-  if (!publicApiPaths.has(req.path) && !authHeader) {
+  if (req.method === 'OPTIONS') return next()
+
+  if (!publicApiPaths.has(req.path) && !authHeader && !hasCookie(req, 'attendi_token')) {
     logWarn('api_missing_auth_blocked', { requestId: req.requestId, method: req.method, path: req.originalUrl })
     return fail(res, 401, 'UNAUTHORIZED', '인증이 필요합니다.')
   }
 
   next()
+}
+
+function setAuthCookie(res, token) {
+  const secure = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL)
+  const sameSite = secure ? 'None' : 'Lax'
+  const parts = [
+    `attendi_token=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    `SameSite=${sameSite}`,
+    'Max-Age=28800',
+  ]
+  if (secure) parts.push('Secure')
+  res.setHeader('Set-Cookie', parts.join('; '))
+}
+
+function clearAuthCookie(res) {
+  const secure = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL)
+  const sameSite = secure ? 'None' : 'Lax'
+  const parts = [
+    'attendi_token=',
+    'Path=/',
+    'HttpOnly',
+    `SameSite=${sameSite}`,
+    'Max-Age=0',
+  ]
+  if (secure) parts.push('Secure')
+  res.setHeader('Set-Cookie', parts.join('; '))
+}
+
+function hasCookie(req, name) {
+  return String(req.headers.cookie || '')
+    .split(';')
+    .map((part) => part.trim())
+    .some((part) => part.startsWith(`${name}=`))
 }
 
 app.use((error, req, res, _next) => {
