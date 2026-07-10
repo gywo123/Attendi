@@ -1,6 +1,15 @@
-const configuredApiBaseUrl = String(import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+function normalizeApiBaseUrl(value: string) {
+  const trimmed = String(value || '').trim().replace(/\/$/, '')
+  if (!trimmed) return ''
+  return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`
+}
+
+const configuredApiBaseUrl = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL || '')
 const useSameOriginApi = Boolean(import.meta.env.PROD && (!configuredApiBaseUrl || configuredApiBaseUrl.includes('attendiserver.vercel.app')))
 export const API_BASE_URL = useSameOriginApi ? '/api' : configuredApiBaseUrl || 'http://localhost:4000/api'
+const OAUTH_API_BASE_URL = configuredApiBaseUrl && configuredApiBaseUrl !== '/api'
+  ? configuredApiBaseUrl
+  : 'https://attendiserver.vercel.app/api'
 const DEFAULT_GET_CACHE_TTL_MS = 3000
 const ACCESS_TOKEN_KEY = 'attendi.accessToken'
 
@@ -66,7 +75,7 @@ export function clearApiCache() {
 }
 
 export function startGoogleLogin(role: 'student' | 'teacher') {
-  window.location.href = `${API_BASE_URL}/auth/google?role=${role}`
+  window.location.href = `${OAUTH_API_BASE_URL}/auth/google?role=${role}`
 }
 
 function isAuthPayload(value: unknown): value is AuthPayload {
