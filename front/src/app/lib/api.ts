@@ -1,4 +1,6 @@
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000/api'
+const configuredApiBaseUrl = String(import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+const useSameOriginApi = Boolean(import.meta.env.PROD && (!configuredApiBaseUrl || configuredApiBaseUrl.includes('attendiserver.vercel.app')))
+export const API_BASE_URL = useSameOriginApi ? '/api' : configuredApiBaseUrl || 'http://localhost:4000/api'
 const DEFAULT_GET_CACHE_TTL_MS = 3000
 const ACCESS_TOKEN_KEY = 'attendi.accessToken'
 
