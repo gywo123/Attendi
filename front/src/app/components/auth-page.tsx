@@ -23,6 +23,7 @@ import {
   loginDevice,
   loginTeacher,
   startGoogleLogin,
+  setAccessToken,
   type AuthPayload,
 } from '../lib/api'
 
@@ -111,7 +112,13 @@ export function AuthPage({ onLogin }: { onLogin: (user: AuthUser) => void }) {
       }
 
       if (auth) {
-        if (!ignore) setAuthNotice('이전 방식의 로그인 링크입니다. 다시 로그인해 주세요.')
+        const payload = decodeClientPayload<AuthPayload>(auth)
+        if (payload?.accessToken) {
+          setAccessToken(payload.accessToken)
+          if (!ignore) onLogin(toAuthUser(payload))
+        } else if (!ignore) {
+          setAuthNotice('이전 방식의 로그인 링크입니다. 다시 로그인해 주세요.')
+        }
         window.history.replaceState({}, '', window.location.pathname)
       }
     }

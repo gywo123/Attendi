@@ -177,7 +177,7 @@ app.get('/api/auth/google/callback', route(async (req, res) => {
       return res.redirect(`${CLIENT_URL}?auth_error=${encodeURIComponent(result.authError)}`)
     }
     setAuthCookie(res, result.accessToken)
-    res.redirect(`${CLIENT_URL}?auth_success=1`)
+    res.redirect(`${CLIENT_URL}?auth=${encodeURIComponent(encodeClientPayload(result))}`)
   } catch (error) {
     logError('google_oauth_failed', error, { requestId: req.requestId })
     res.redirect(`${CLIENT_URL}?auth_error=google_oauth_failed`)
