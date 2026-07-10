@@ -1,5 +1,6 @@
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000/api'
 const DEFAULT_GET_CACHE_TTL_MS = 3000
+const ACCESS_TOKEN_KEY = 'attendi.accessToken'
 
 type ApiRequestOptions = RequestInit & {
   cacheTtlMs?: number
@@ -46,11 +47,15 @@ export type AuthPayload = {
 }
 
 export function getAccessToken() {
-  return ''
+  return localStorage.getItem(ACCESS_TOKEN_KEY) || ''
+}
+
+export function setAccessToken(token: string) {
+  if (token) localStorage.setItem(ACCESS_TOKEN_KEY, token)
 }
 
 export function clearAccessToken() {
-  localStorage.removeItem('attendi.accessToken')
+  localStorage.removeItem(ACCESS_TOKEN_KEY)
 }
 
 export function clearApiCache() {
@@ -60,6 +65,15 @@ export function clearApiCache() {
 
 export function startGoogleLogin(role: 'student' | 'teacher') {
   window.location.href = `${API_BASE_URL}/auth/google?role=${role}`
+}
+
+function isAuthPayload(value: unknown): value is AuthPayload {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    'accessToken' in value &&
+    typeof (value as { accessToken?: unknown }).accessToken === 'string'
+  )
 }
 
 export async function apiFetch<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
@@ -86,6 +100,9 @@ export async function apiFetch<T>(path: string, options: ApiRequestOptions = {})
       const payload = await response.json() as ApiResponse<T>
       if (!payload.success) {
         throw new ApiError(payload.error.code, payload.error.message, response.status)
+      }
+      if (isAuthPayload(payload.data)) {
+        setAccessToken(payload.data.accessToken)
       }
       if (isGet && !options.skipCache && cacheTtlMs > 0) {
         getCache.set(cacheKey, { data: payload.data, expiresAt: Date.now() + cacheTtlMs })
