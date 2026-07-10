@@ -1,0 +1,66 @@
+name: Fix OAuth Login
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-oauth-login.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch OAuth token handoff
+        run: |
+          node <<'NODE'
+          const fs = require('fs')
+
+          function patchFile(path, updater) {
+            const before = fs.readFileSync(path, 'utf8')
+            const after = updater(before)
+            if (after !== before) fs.writeFileSync(path, after)
+          }
+
+          patchFile('server/src/index.js', (source) => {
+            const before = "    setAuthCookie(res, result.accessToken)\n    res.redirect(`${CLIENT_URL}?auth_success=1`)"
+            const after = "    setAuthCookie(res, result.accessToken)\n    res.redirect(`${CLIENT_URL}?auth=${encodeURIComponent(encodeClientPayload(result))}`)"
+            if (source.includes(after)) return source
+            if (!source.includes(before)) throw new Error('OAuth callback success redirect pattern not found')
+            return source.replace(before, after)
+          })
+
+          patchFile('front/src/app/components/auth-page.tsx', (source) => {
+            let next = source
+            if (!next.includes('  setAccessToken,\n')) {
+              const importBefore = "  startGoogleLogin,\n  type AuthPayload,"
+              const importAfter = "  startGoogleLogin,\n  setAccessToken,\n  type AuthPayload,"
+              if (!next.includes(importBefore)) throw new Error('AuthPage API import pattern not found')
+              next = next.replace(importBefore, importAfter)
+            }
+
+            const oldAuthBlock = "      if (auth) {\n        if (!ignore) setAuthNotice('이전 방식의 로그인 링크입니다. 다시 로그인해 주세요.')\n        window.history.replaceState({}, '', window.location.pathname)\n      }"
+            const newAuthBlock = "      if (auth) {\n        const payload = decodeClientPayload<AuthPayload>(auth)\n        if (payload?.accessToken) {\n          setAccessToken(payload.accessToken)\n          if (!ignore) onLogin(toAuthUser(payload))\n        } else if (!ignore) {\n          setAuthNotice('이전 방식의 로그인 링크입니다. 다시 로그인해 주세요.')\n        }\n        window.history.replaceState({}, '', window.location.pathname)\n      }"
+            if (!next.includes(newAuthBlock)) {
+              if (!next.includes(oldAuthBlock)) throw new Error('AuthPage auth redirect pattern not found')
+              next = next.replace(oldAuthBlock, newAuthBlock)
+            }
+            return next
+          })
+
+          fs.rmSync('.github/workflows/fix-oauth-login.yml', { force: true })
+          NODE
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server/src/index.js front/src/app/components/auth-page.tsx .github/workflows/fix-oauth-login.yml
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Fix Google OAuth token handoff [skip ci]"
+          git push
