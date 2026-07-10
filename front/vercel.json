@@ -1,4 +1,10 @@
 {
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://attendiserver.vercel.app/api/:path*"
+    }
+  ],
   "headers": [
     {
       "source": "/(.*)",
