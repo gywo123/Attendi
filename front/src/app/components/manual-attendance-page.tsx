@@ -218,11 +218,14 @@ export function ManualAttendancePage() {
     setMessage('')
   }
 
-  function resetCell(studentId: string, period: number) {
-    setEdits((current) => ({
-      ...current,
-      [editKey(studentId, period)]: { status: 'unset', reasonCategory: null, note: '' },
-    }))
+  function resetStudent(studentId: string) {
+    setEdits((current) => {
+      const next = { ...current }
+      for (const period of PERIODS) {
+        next[editKey(studentId, period)] = { status: 'unset', reasonCategory: null, note: '' }
+      }
+      return next
+    })
     setMessage('')
   }
 
@@ -298,10 +301,15 @@ export function ManualAttendancePage() {
                 <div key={student.id} className="grid grid-cols-[220px_repeat(8,minmax(100px,1fr))] border-b border-gray-100 last:border-b-0">
                   <div className="sticky left-0 z-10 flex min-h-24 items-center gap-3 border-r border-gray-200 bg-white px-4 py-3">
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-100 text-gray-500"><User size={15} /></span>
-                    <div className="min-w-0">
+                    <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium text-gray-900">{student.name}</p>
                       <p className="text-xs text-gray-400">{student.className} · {student.number}번</p>
                     </div>
+                    {PERIODS.some((period) => getCell(student.id, period).status !== 'unset') && (
+                      <button type="button" onClick={() => resetStudent(student.id)} title={`${student.name}의 전체 교시 초기화`} aria-label={`${student.name}의 전체 교시 초기화`} className="shrink-0 rounded-md border border-gray-200 p-1.5 text-gray-400 hover:bg-gray-50 hover:text-gray-700">
+                        <RotateCcw size={13} />
+                      </button>
+                    )}
                   </div>
                   {PERIODS.map((period) => (
                     <AttendanceCell
@@ -310,7 +318,6 @@ export function ManualAttendancePage() {
                       onStatusChange={(status) => changeStatus(student.id, period, status)}
                       onReasonChange={(reason) => changeReason(student.id, period, reason)}
                       onNoteChange={(note) => changeNote(student.id, period, note)}
-                      onReset={() => resetCell(student.id, period)}
                     />
                   ))}
                 </div>
@@ -344,22 +351,15 @@ function AttendanceCell({
   onStatusChange,
   onReasonChange,
   onNoteChange,
-  onReset,
 }: {
   value: CellValue
   onStatusChange: (status: AttendanceStatus) => void
   onReasonChange: (reason: ReasonCategory) => void
   onNoteChange: (note: string) => void
-  onReset: () => void
 }) {
   const Icon = STATUS_ICON[value.status]
   return (
-    <div className={`relative min-h-24 border-r border-gray-100 p-2 last:border-r-0 ${value.inherited ? 'bg-gray-50/50' : 'bg-white'}`}>
-      {value.status !== 'unset' && (
-        <button type="button" onClick={onReset} title="이 교시를 미처리로 초기화" aria-label="이 교시를 미처리로 초기화" className="absolute right-1 top-1 z-10 rounded p-1 text-gray-400 hover:bg-white hover:text-gray-700">
-          <RotateCcw size={11} />
-        </button>
-      )}
+    <div className={`min-h-24 border-r border-gray-100 p-2 last:border-r-0 ${value.inherited ? 'bg-gray-50/50' : 'bg-white'}`}>
       <label className={`flex items-center rounded-md border ${STATUS_STYLE[value.status]} ${value.inherited ? 'border-dashed opacity-75' : ''}`}>
         <Icon size={12} className="ml-2 shrink-0" />
         <select value={value.status} onChange={(event) => onStatusChange(event.target.value as AttendanceStatus)} className="min-w-0 flex-1 appearance-none bg-transparent px-1.5 py-2 text-xs font-medium outline-none">
