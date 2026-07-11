@@ -760,12 +760,10 @@ app.get('/api/attendance/summary', authRequired(['teacher', 'admin']), route(asy
   const present = counts.present || 0
   const late = counts.late || 0
   const earlyLeave = counts.early_leave || 0
-  const outing = counts.outing || 0
-  const excused = counts.excused || 0
-  const sick = counts.sick || 0
+  const result = counts.result || 0
   const explicitAbsent = counts.absent || 0
   const explicitUnset = counts.unset || 0
-  const unprocessed = Math.max(0, total - present - late - earlyLeave - outing - excused - sick - explicitAbsent)
+  const unprocessed = Math.max(0, total - present - late - earlyLeave - result - explicitAbsent)
   const recentScans = await Promise.all(publicDocs(recentRecords).map(withRecentAttendanceNames))
 
   ok(res, {
@@ -778,9 +776,7 @@ app.get('/api/attendance/summary', authRequired(['teacher', 'admin']), route(asy
       late,
       absent: explicitAbsent,
       earlyLeave,
-      outing,
-      excused,
-      sick,
+      result,
       unprocessed: Math.max(unprocessed, explicitUnset),
     },
     recentScans: recentScans.map((row) => ({ ...row, status: toClientStatus(row.status) })),
@@ -814,12 +810,10 @@ app.get('/api/attendance/weekly-summary', authRequired(['teacher', 'admin']), ro
       const present = counts.present || 0
       const late = counts.late || 0
       const earlyLeave = counts.early_leave || 0
-      const outing = counts.outing || 0
-      const excused = counts.excused || 0
-      const sick = counts.sick || 0
+      const result = counts.result || 0
       const explicitAbsent = counts.absent || 0
       const explicitUnset = counts.unset || 0
-      const unprocessed = Math.max(0, total - present - late - earlyLeave - outing - excused - sick - explicitAbsent)
+      const unprocessed = Math.max(0, total - present - late - earlyLeave - result - explicitAbsent)
       const attended = present + late + earlyLeave
       return {
         date,
@@ -828,9 +822,7 @@ app.get('/api/attendance/weekly-summary', authRequired(['teacher', 'admin']), ro
         present,
         late,
         earlyLeave,
-        outing,
-        excused,
-        sick,
+        result,
         absent: explicitAbsent,
         unprocessed: Math.max(unprocessed, explicitUnset),
         attended,
@@ -846,7 +838,7 @@ app.get('/api/attendance', authRequired(['teacher', 'admin']), route(async (req,
 
 app.get('/api/attendance/export.csv', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const rows = await readAttendanceRows(req.query)
-  const header = ['date', 'period', 'className', 'studentNumber', 'studentName', 'status', 'verifiedByQr', 'verifiedAt', 'memo']
+  const header = ['date', 'period', 'className', 'studentNumber', 'studentName', 'status', 'reasonCategory', 'verifiedByQr', 'verifiedAt', 'memo']
   const body = rows.map((row) => [
     row.date,
     row.period || 1,
@@ -854,6 +846,7 @@ app.get('/api/attendance/export.csv', authRequired(['teacher', 'admin']), route(
     row.studentNumber,
     row.studentName,
     toClientStatus(row.status),
+    row.reasonCategory || '',
     row.verifiedByQr ? 'QR' : 'manual',
     row.verifiedAt || '',
     row.memo || '',
@@ -895,19 +888,24 @@ app.post('/api/attendance/reopen', writeRateLimit, authRequired(['teacher', 'adm
 app.post('/api/attendance/manual', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const selectedDate = body.date ? dateKey(body.date) : today()
-  const period = optionalInteger(body, 'period', '교시', { defaultValue: 1, min: 1, max: 12 })
+  const defaultPeriod = optionalInteger(body, 'period', '교시', { defaultValue: 1, min: 1, max: 8 })
   const input = Array.isArray(body.records) ? body.records : [body]
   const saved = []
 
   for (const item of input) {
     if (!item || typeof item !== 'object') continue
     if (!item.studentId || !item.status) continue
+    const period = optionalInteger(item, 'period', '교시', { defaultValue: defaultPeriod, min: 1, max: 8 })
     const student = await getStudentById(item.studentId)
     if (!student) continue
     if (await isAttendanceClosed(selectedDate, student.classId, period)) {
       return fail(res, 409, 'ATTENDANCE_CLOSED', '이미 마감된 날짜 또는 반입니다.')
     }
-    const status = toDbStatus(enumValue(String(item.status), ['present', 'late', 'absent', 'early', 'early_leave', 'outing', 'excused', 'sick', 'unset'], 'status', '출석 상태'))
+    const status = toDbStatus(enumValue(String(item.status), ['present', 'late', 'absent', 'early', 'early_leave', 'result', 'unset'], 'status', '출석 상태'))
+    const requiresReason = ['late', 'absent', 'early_leave', 'result'].includes(status)
+    const reasonCategory = requiresReason
+      ? enumValue(String(item.reasonCategory || 'other'), ['illness', 'unexcused', 'other'], 'reasonCategory', '출결 사유')
+      : null
     const verifiedAt = ['absent', 'unset'].includes(status) ? null : toIsoAtDateTime(selectedDate, item.time)
     const updatedAt = now()
     const filter = { studentId: student.id, classId: student.classId, date: selectedDate, period }
@@ -915,6 +913,7 @@ app.post('/api/attendance/manual', writeRateLimit, authRequired(['teacher', 'adm
     const data = {
       ...filter,
       status,
+      reasonCategory,
       memo: item.memo || item.note || '',
       verifiedByQr: false,
       verifiedAt,
@@ -925,10 +924,10 @@ app.post('/api/attendance/manual', writeRateLimit, authRequired(['teacher', 'adm
     } else {
       await insertDoc('attendanceRecords', data)
     }
-    saved.push({ studentId: student.id, status: toClientStatus(status), period })
+    saved.push({ studentId: student.id, status: toClientStatus(status), reasonCategory, period })
   }
 
-  ok(res, { savedCount: saved.length, period, records: saved })
+  ok(res, { savedCount: saved.length, records: saved })
 }))
 
 app.get('/api/device-tokens', authRequired(['teacher', 'admin']), route(async (_req, res) => {
@@ -1276,6 +1275,7 @@ async function createMissingAbsences({ date, classId, period = 1 }) {
       await insertDoc('attendanceRecords', {
         ...filter,
         status: 'absent',
+        reasonCategory: 'unexcused',
         memo: '마감 시 자동 결석 처리',
         verifiedByQr: false,
         verifiedAt: null,

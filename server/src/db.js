@@ -111,7 +111,7 @@ export async function ensureInitialData() {
       lateAfterTime: '09:10',
       closeTime: '17:00',
       autoAbsentEnabled: false,
-      statuses: ['present', 'late', 'absent', 'early_leave', 'outing', 'excused', 'sick'],
+      statuses: ['present', 'late', 'absent', 'early_leave', 'result', 'unset'],
       updatedAt: now(),
     })
     await syncCounter('attendancePolicies')
@@ -156,45 +156,66 @@ function ensureIndexesInBackground() {
 }
 
 async function ensureAttendancePeriodSchema() {
+  const existingCollections = new Set(
+    (await database.listCollections({}, { nameOnly: true }).toArray()).map((item) => item.name),
+  )
+  if (!existingCollections.has('attendanceRecords')) await database.createCollection('attendanceRecords')
+  if (!existingCollections.has('attendanceClosures')) await database.createCollection('attendanceClosures')
+
   const version = await col('appMeta').findOne({ _id: 'attendancePeriodSchema' })
-  if (Number(version?.version || 0) >= 2) return
+  const currentVersion = Number(version?.version || 0)
+  if (currentVersion >= 3) return
 
   const attendance = col('attendanceRecords')
-  const indexes = await attendance.indexes()
-  for (const index of indexes) {
-    const keys = Object.keys(index.key || {})
-    if (index.unique && keys.join(',') === 'studentId,classId,date') {
-      await attendance.dropIndex(index.name)
+  if (currentVersion < 2) {
+    const indexes = await attendance.indexes()
+    for (const index of indexes) {
+      const keys = Object.keys(index.key || {})
+      if (index.unique && keys.join(',') === 'studentId,classId,date') {
+        await attendance.dropIndex(index.name)
+      }
     }
+
+    await attendance.updateMany(
+      { period: { $exists: false } },
+      { $set: { period: 1 } },
+    )
+    await attendance.createIndex(
+      { studentId: 1, classId: 1, date: 1, period: 1 },
+      { unique: true },
+    )
+    const closures = col('attendanceClosures')
+    const closureIndexes = await closures.indexes()
+    for (const index of closureIndexes) {
+      const keys = Object.keys(index.key || {})
+      if (index.unique && keys.join(',') === 'date,classId') {
+        await closures.dropIndex(index.name)
+      }
+    }
+    await closures.updateMany(
+      { period: { $exists: false } },
+      { $set: { period: 1 } },
+    )
+    await closures.createIndex(
+      { date: 1, classId: 1, period: 1 },
+      { unique: true },
+    )
   }
 
+  await attendance.updateMany({ status: 'outing' }, { $set: { status: 'result', reasonCategory: 'other' } })
+  await attendance.updateMany({ status: 'sick' }, { $set: { status: 'absent', reasonCategory: 'illness' } })
+  await attendance.updateMany({ status: 'excused' }, { $set: { status: 'absent', reasonCategory: 'other' } })
   await attendance.updateMany(
-    { period: { $exists: false } },
-    { $set: { period: 1 } },
+    { status: { $in: ['late', 'absent', 'early_leave', 'result'] }, reasonCategory: { $exists: false } },
+    { $set: { reasonCategory: 'other' } },
   )
-  await attendance.createIndex(
-    { studentId: 1, classId: 1, date: 1, period: 1 },
-    { unique: true },
-  )
-  const closures = col('attendanceClosures')
-  const closureIndexes = await closures.indexes()
-  for (const index of closureIndexes) {
-    const keys = Object.keys(index.key || {})
-    if (index.unique && keys.join(',') === 'date,classId') {
-      await closures.dropIndex(index.name)
-    }
-  }
-  await closures.updateMany(
-    { period: { $exists: false } },
-    { $set: { period: 1 } },
-  )
-  await closures.createIndex(
-    { date: 1, classId: 1, period: 1 },
-    { unique: true },
+  await attendance.updateMany(
+    { status: { $in: ['present', 'unset'] }, reasonCategory: { $exists: true } },
+    { $unset: { reasonCategory: '' } },
   )
   await col('appMeta').updateOne(
     { _id: 'attendancePeriodSchema' },
-    { $set: { version: 2, updatedAt: now() } },
+    { $set: { version: 3, updatedAt: now() } },
     { upsert: true },
   )
 }

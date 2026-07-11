@@ -2,7 +2,8 @@ import { col, insertDoc, publicDoc, publicDocs } from './db.js'
 import { now } from './time.js'
 import { hashToken } from './security.js'
 
-export const ATTENDANCE_STATUSES = ['present', 'late', 'absent', 'early_leave', 'outing', 'excused', 'sick', 'unset']
+export const ATTENDANCE_STATUSES = ['present', 'late', 'absent', 'early_leave', 'result', 'unset']
+export const ATTENDANCE_REASON_CATEGORIES = ['illness', 'unexcused', 'other']
 
 export async function getStudentFromRequest(req) {
   if (req.user?.role === 'student') {

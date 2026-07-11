@@ -14,12 +14,12 @@ import {
   AlertCircle,
   ChevronDown,
   Search,
-  MapPin,
 } from 'lucide-react'
 import { API_BASE_URL, apiFetch } from '../lib/api'
 import { classShort, studentClassOptions, type ClassOption } from '../lib/classes'
 
-type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'outing' | 'excused' | 'sick' | 'unset'
+type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'result' | 'unset'
+type ReasonCategory = 'illness' | 'unexcused' | 'other'
 
 type Record_ = {
   studentId: string
@@ -34,6 +34,7 @@ type Record_ = {
   checkOut: string | null
   qrVerified: boolean
   note: string
+  reasonCategory: ReasonCategory | null
 }
 
 const DATES = Array.from({ length: 7 }, (_, index) => {
@@ -41,7 +42,7 @@ const DATES = Array.from({ length: 7 }, (_, index) => {
   date.setDate(date.getDate() - index)
   return date.toISOString().slice(0, 10)
 })
-const STATUS_FILTER = ['전체', '미처리', '출석', '지각', '결석', '조퇴', '외출', '공결', '병결']
+const STATUS_FILTER = ['전체', '미처리', '출석', '지각', '결석', '조퇴', '결과']
 
 const STATUS_CONFIG: Record<AttendanceStatus, { label: string; bg: string; text: string; border: string; icon: ReactNode }> = {
   unset: { label: '미처리', bg: 'bg-gray-50', text: 'text-gray-600', border: 'border-gray-200', icon: <AlertCircle size={11} /> },
@@ -49,9 +50,13 @@ const STATUS_CONFIG: Record<AttendanceStatus, { label: string; bg: string; text:
   late: { label: '지각', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', icon: <Clock size={11} /> },
   absent: { label: '결석', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', icon: <XCircle size={11} /> },
   early: { label: '조퇴', bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', icon: <LogOut size={11} /> },
-  outing: { label: '외출', bg: 'bg-cyan-50', text: 'text-cyan-700', border: 'border-cyan-200', icon: <MapPin size={11} /> },
-  excused: { label: '공결', bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200', icon: <FileText size={11} /> },
-  sick: { label: '병결', bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', icon: <AlertCircle size={11} /> },
+  result: { label: '결과', bg: 'bg-violet-50', text: 'text-violet-700', border: 'border-violet-200', icon: <FileText size={11} /> },
+}
+
+const REASON_LABEL: Record<ReasonCategory, string> = {
+  illness: '질병',
+  unexcused: '미인정',
+  other: '기타',
 }
 
 type ApiAttendanceRow = {
@@ -67,6 +72,7 @@ type ApiAttendanceRow = {
   verifiedByQr: boolean
   verifiedAt: string | null
   memo: string | null
+  reasonCategory?: ReasonCategory | null
 }
 
 type ApiStudent = {
@@ -95,9 +101,10 @@ function mapAttendanceRow(row: ApiAttendanceRow): Record_ {
     period: Number(row.period || 1),
     status: row.status,
     checkIn: timeOnly(row.verifiedAt),
-    checkOut: row.status === 'early' || row.status === 'outing' ? timeOnly(row.verifiedAt) : null,
+    checkOut: row.status === 'early' || row.status === 'result' ? timeOnly(row.verifiedAt) : null,
     qrVerified: row.verifiedByQr,
     note: row.memo || '',
+    reasonCategory: row.reasonCategory || null,
   }
 }
 
@@ -162,9 +169,7 @@ export function AttendanceRecordsPage() {
     late: filtered.filter((r) => r.status === 'late').length,
     absent: filtered.filter((r) => r.status === 'absent').length,
     early: filtered.filter((r) => r.status === 'early').length,
-    outing: filtered.filter((r) => r.status === 'outing').length,
-    excused: filtered.filter((r) => r.status === 'excused').length,
-    sick: filtered.filter((r) => r.status === 'sick').length,
+    result: filtered.filter((r) => r.status === 'result').length,
     unset: filtered.filter((r) => r.status === 'unset').length,
   }
 
@@ -349,9 +354,8 @@ function AttendanceRow({ record }: { record: Record_ }) {
             {record.checkOut && (
               <span className="text-xs text-gray-500">이탈 {record.checkOut}</span>
             )}
-            {record.note && (
-              <span className="text-xs text-gray-400">— {record.note}</span>
-            )}
+            {record.reasonCategory && <span className="text-xs text-gray-500">{REASON_LABEL[record.reasonCategory]}</span>}
+            {record.note && <span className="text-xs text-gray-400">— {record.note}</span>}
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -392,7 +396,9 @@ function AttendanceRow({ record }: { record: Record_ }) {
             </span>
           )}
         </div>
-        <span className="text-xs text-gray-400 truncate">{record.note || '—'}</span>
+        <span className="text-xs text-gray-500 truncate">
+          {[record.reasonCategory ? REASON_LABEL[record.reasonCategory] : '', record.note].filter(Boolean).join(' · ') || '—'}
+        </span>
       </div>
     </div>
   )
