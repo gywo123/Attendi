@@ -44,11 +44,12 @@ type Student = {
 type CellValue = {
   status: AttendanceStatus
   reasonCategory: ReasonCategory | null
+  note: string
   inherited: boolean
   sourcePeriod: number | null
 }
 
-type EditValue = Pick<CellValue, 'status' | 'reasonCategory'>
+type EditValue = Pick<CellValue, 'status' | 'reasonCategory' | 'note'>
 
 const PERIODS = Array.from({ length: 8 }, (_, index) => index + 1)
 
@@ -165,7 +166,7 @@ export function ManualAttendancePage() {
   })
 
   function getCell(studentId: string, targetPeriod: number): CellValue {
-    let carried: CellValue = { status: 'unset', reasonCategory: null, inherited: false, sourcePeriod: null }
+    let carried: CellValue = { status: 'unset', reasonCategory: null, note: '', inherited: false, sourcePeriod: null }
     for (const period of PERIODS) {
       if (period > targetPeriod) break
       const edited = edits[editKey(studentId, period)]
@@ -176,6 +177,7 @@ export function ManualAttendancePage() {
         carried = {
           status: saved.status,
           reasonCategory: saved.reasonCategory || (requiresReason(saved.status) ? 'other' : null),
+          note: saved.memo || '',
           inherited: false,
           sourcePeriod: period,
         }
@@ -192,6 +194,7 @@ export function ManualAttendancePage() {
       [editKey(studentId, period)]: {
         status,
         reasonCategory: requiresReason(status) ? (getCell(studentId, period).reasonCategory || 'other') : null,
+        note: requiresReason(status) ? getCell(studentId, period).note : '',
       },
     }))
     setMessage('')
@@ -201,7 +204,24 @@ export function ManualAttendancePage() {
     const cell = getCell(studentId, period)
     setEdits((current) => ({
       ...current,
-      [editKey(studentId, period)]: { status: cell.status, reasonCategory },
+      [editKey(studentId, period)]: { status: cell.status, reasonCategory, note: cell.note },
+    }))
+    setMessage('')
+  }
+
+  function changeNote(studentId: string, period: number, note: string) {
+    const cell = getCell(studentId, period)
+    setEdits((current) => ({
+      ...current,
+      [editKey(studentId, period)]: { status: cell.status, reasonCategory: cell.reasonCategory, note },
+    }))
+    setMessage('')
+  }
+
+  function resetCell(studentId: string, period: number) {
+    setEdits((current) => ({
+      ...current,
+      [editKey(studentId, period)]: { status: 'unset', reasonCategory: null, note: '' },
     }))
     setMessage('')
   }
@@ -221,6 +241,7 @@ export function ManualAttendancePage() {
           period: Number(rawPeriod),
           status: value.status,
           reasonCategory: value.reasonCategory,
+          note: value.note,
           time: new Date().toTimeString().slice(0, 5),
         }
       })
@@ -288,6 +309,8 @@ export function ManualAttendancePage() {
                       value={getCell(student.id, period)}
                       onStatusChange={(status) => changeStatus(student.id, period, status)}
                       onReasonChange={(reason) => changeReason(student.id, period, reason)}
+                      onNoteChange={(note) => changeNote(student.id, period, note)}
+                      onReset={() => resetCell(student.id, period)}
                     />
                   ))}
                 </div>
@@ -296,7 +319,7 @@ export function ManualAttendancePage() {
           </div>
           <div className="flex items-center justify-between border-t border-gray-100 px-4 py-3 text-xs text-gray-400">
             <span>{filteredStudents.length}명 표시</span>
-            <span>연한 점선은 이전 교시 상태 승계</span>
+            <span>변경된 칸 {Object.keys(edits).length}개</span>
           </div>
         </div>
 
@@ -320,14 +343,23 @@ function AttendanceCell({
   value,
   onStatusChange,
   onReasonChange,
+  onNoteChange,
+  onReset,
 }: {
   value: CellValue
   onStatusChange: (status: AttendanceStatus) => void
   onReasonChange: (reason: ReasonCategory) => void
+  onNoteChange: (note: string) => void
+  onReset: () => void
 }) {
   const Icon = STATUS_ICON[value.status]
   return (
-    <div className={`min-h-24 border-r border-gray-100 p-2 last:border-r-0 ${value.inherited ? 'bg-gray-50/50' : 'bg-white'}`}>
+    <div className={`relative min-h-24 border-r border-gray-100 p-2 last:border-r-0 ${value.inherited ? 'bg-gray-50/50' : 'bg-white'}`}>
+      {value.status !== 'unset' && (
+        <button type="button" onClick={onReset} title="이 교시를 미처리로 초기화" aria-label="이 교시를 미처리로 초기화" className="absolute right-1 top-1 z-10 rounded p-1 text-gray-400 hover:bg-white hover:text-gray-700">
+          <RotateCcw size={11} />
+        </button>
+      )}
       <label className={`flex items-center rounded-md border ${STATUS_STYLE[value.status]} ${value.inherited ? 'border-dashed opacity-75' : ''}`}>
         <Icon size={12} className="ml-2 shrink-0" />
         <select value={value.status} onChange={(event) => onStatusChange(event.target.value as AttendanceStatus)} className="min-w-0 flex-1 appearance-none bg-transparent px-1.5 py-2 text-xs font-medium outline-none">
@@ -335,11 +367,13 @@ function AttendanceCell({
         </select>
       </label>
       {requiresReason(value.status) && (
-        <select value={value.reasonCategory || 'other'} onChange={(event) => onReasonChange(event.target.value as ReasonCategory)} className="mt-1.5 w-full rounded-md border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-600 outline-none">
-          {REASON_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>
+        <>
+          <select value={value.reasonCategory || 'other'} onChange={(event) => onReasonChange(event.target.value as ReasonCategory)} className="mt-1.5 w-full rounded-md border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-600 outline-none">
+            {REASON_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+          <input value={value.note} onChange={(event) => onNoteChange(event.target.value)} maxLength={200} placeholder="상세 사유" className="mt-1.5 w-full rounded-md border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-600 outline-none placeholder:text-gray-300" />
+        </>
       )}
-      {value.inherited && <p className="mt-1 text-center text-[10px] text-gray-400">{value.sourcePeriod}교시에서 이어짐</p>}
     </div>
   )
 }

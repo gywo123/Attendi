@@ -906,6 +906,7 @@ app.post('/api/attendance/manual', writeRateLimit, authRequired(['teacher', 'adm
     const reasonCategory = requiresReason
       ? enumValue(String(item.reasonCategory || 'other'), ['illness', 'unexcused', 'other'], 'reasonCategory', '출결 사유')
       : null
+    const memo = optionalString(item, 'note', '상세 사유', { defaultValue: String(item.memo || ''), max: 500 })
     const verifiedAt = ['absent', 'unset'].includes(status) ? null : toIsoAtDateTime(selectedDate, item.time)
     const updatedAt = now()
     const filter = { studentId: student.id, classId: student.classId, date: selectedDate, period }
@@ -914,7 +915,7 @@ app.post('/api/attendance/manual', writeRateLimit, authRequired(['teacher', 'adm
       ...filter,
       status,
       reasonCategory,
-      memo: item.memo || item.note || '',
+      memo: String(memo),
       verifiedByQr: false,
       verifiedAt,
       updatedAt,

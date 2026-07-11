@@ -1,56 +1,61 @@
-import { useEffect, useState } from 'react'
-import type { ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
+  AlertCircle,
   Calendar,
-  Download,
-  Filter,
-  Shield,
-  ShieldOff,
   CheckCircle2,
   Clock,
-  XCircle,
-  LogOut,
+  Download,
   FileText,
-  AlertCircle,
-  ChevronDown,
+  LogOut,
   Search,
+  Shield,
+  ShieldOff,
+  User,
+  XCircle,
 } from 'lucide-react'
-import { API_BASE_URL, apiFetch } from '../lib/api'
+import { apiFetch } from '../lib/api'
 import { classShort, studentClassOptions, type ClassOption } from '../lib/classes'
 
 type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'result' | 'unset'
 type ReasonCategory = 'illness' | 'unexcused' | 'other'
 
-type Record_ = {
-  studentId: string
+type ApiStudent = {
+  id: number
+  studentNumber: string
   name: string
   classId: number
-  class: string
-  number: number
-  date: string
-  period: number
-  status: AttendanceStatus
-  checkIn: string | null
-  checkOut: string | null
-  qrVerified: boolean
-  note: string
-  reasonCategory: ReasonCategory | null
+  className: string
 }
 
-const DATES = Array.from({ length: 7 }, (_, index) => {
-  const date = new Date()
-  date.setDate(date.getDate() - index)
-  return date.toISOString().slice(0, 10)
-})
-const STATUS_FILTER = ['전체', '미처리', '출석', '지각', '결석', '조퇴', '결과']
+type ApiAttendanceRow = {
+  id: number
+  studentId: number
+  period?: number
+  status: AttendanceStatus
+  reasonCategory?: ReasonCategory | null
+  verifiedByQr: boolean
+  verifiedAt: string | null
+  memo: string | null
+}
 
-const STATUS_CONFIG: Record<AttendanceStatus, { label: string; bg: string; text: string; border: string; icon: ReactNode }> = {
-  unset: { label: '미처리', bg: 'bg-gray-50', text: 'text-gray-600', border: 'border-gray-200', icon: <AlertCircle size={11} /> },
-  present: { label: '출석', bg: 'bg-green-50', text: 'text-green-700', border: 'border-green-200', icon: <CheckCircle2 size={11} /> },
-  late: { label: '지각', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', icon: <Clock size={11} /> },
-  absent: { label: '결석', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', icon: <XCircle size={11} /> },
-  early: { label: '조퇴', bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', icon: <LogOut size={11} /> },
-  result: { label: '결과', bg: 'bg-violet-50', text: 'text-violet-700', border: 'border-violet-200', icon: <FileText size={11} /> },
+type AttendanceCellValue = {
+  status: AttendanceStatus
+  reasonCategory: ReasonCategory | null
+  note: string
+  verifiedByQr: boolean
+  verifiedAt: string | null
+  inherited: boolean
+}
+
+const PERIODS = Array.from({ length: 8 }, (_, index) => index + 1)
+
+const STATUS_CONFIG: Record<AttendanceStatus, { label: string; style: string; icon: ReactNode }> = {
+  unset: { label: '미처리', style: 'border-gray-200 bg-gray-50 text-gray-500', icon: <AlertCircle size={11} /> },
+  present: { label: '출석', style: 'border-green-200 bg-green-50 text-green-700', icon: <CheckCircle2 size={11} /> },
+  late: { label: '지각', style: 'border-amber-200 bg-amber-50 text-amber-700', icon: <Clock size={11} /> },
+  absent: { label: '결석', style: 'border-red-200 bg-red-50 text-red-700', icon: <XCircle size={11} /> },
+  early: { label: '조퇴', style: 'border-blue-200 bg-blue-50 text-blue-700', icon: <LogOut size={11} /> },
+  result: { label: '결과', style: 'border-violet-200 bg-violet-50 text-violet-700', icon: <FileText size={11} /> },
 }
 
 const REASON_LABEL: Record<ReasonCategory, string> = {
@@ -59,30 +64,10 @@ const REASON_LABEL: Record<ReasonCategory, string> = {
   other: '기타',
 }
 
-type ApiAttendanceRow = {
-  id: number
-  studentId: number
-  studentName: string
-  studentNumber: string
-  classId: number
-  className: string
-  date: string
-  period?: number
-  status: AttendanceStatus
-  verifiedByQr: boolean
-  verifiedAt: string | null
-  memo: string | null
-  reasonCategory?: ReasonCategory | null
-}
-
-type ApiStudent = {
-  classId: number
-  className: string
-}
-
-function timeOnly(value: string | null) {
-  if (!value) return null
-  return new Date(value).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
+function todayString() {
+  const now = new Date()
+  const offset = now.getTimezoneOffset() * 60_000
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10)
 }
 
 function displayNumber(studentNumber: string) {
@@ -90,328 +75,204 @@ function displayNumber(studentNumber: string) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : Number(studentNumber) || 0
 }
 
-function mapAttendanceRow(row: ApiAttendanceRow): Record_ {
-  return {
-    studentId: row.studentNumber,
-    name: row.studentName,
-    classId: row.classId,
-    class: classShort(row.className),
-    number: displayNumber(row.studentNumber),
-    date: row.date,
-    period: Number(row.period || 1),
-    status: row.status,
-    checkIn: timeOnly(row.verifiedAt),
-    checkOut: row.status === 'early' || row.status === 'result' ? timeOnly(row.verifiedAt) : null,
-    qrVerified: row.verifiedByQr,
-    note: row.memo || '',
-    reasonCategory: row.reasonCategory || null,
+function getCell(rows: ApiAttendanceRow[], studentId: number, targetPeriod: number): AttendanceCellValue {
+  let carried: AttendanceCellValue = {
+    status: 'unset',
+    reasonCategory: null,
+    note: '',
+    verifiedByQr: false,
+    verifiedAt: null,
+    inherited: false,
   }
+  let hasSource = false
+  for (const period of PERIODS) {
+    if (period > targetPeriod) break
+    const explicit = rows.find((row) => row.studentId === studentId && Number(row.period || 1) === period)
+    if (explicit) {
+      carried = {
+        status: explicit.status,
+        reasonCategory: explicit.reasonCategory || null,
+        note: explicit.memo || '',
+        verifiedByQr: Boolean(explicit.verifiedByQr),
+        verifiedAt: explicit.verifiedAt,
+        inherited: false,
+      }
+      hasSource = true
+    } else if (hasSource) {
+      carried = { ...carried, inherited: true }
+    }
+  }
+  return carried
+}
+
+function csvCell(value: unknown) {
+  const text = String(value ?? '')
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
 export function AttendanceRecordsPage() {
-  const [records, setRecords] = useState<Record_[]>([])
-  const [classOptions, setClassOptions] = useState<ClassOption[]>([])
-  const [dateFilter, setDateFilter] = useState(DATES[0])
-  const [periodFilter, setPeriodFilter] = useState(1)
+  const [students, setStudents] = useState<ApiStudent[]>([])
+  const [rows, setRows] = useState<ApiAttendanceRow[]>([])
+  const [date, setDate] = useState(todayString())
+  const [focusPeriod, setFocusPeriod] = useState(1)
   const [classFilter, setClassFilter] = useState('all')
-  const [statusFilter, setStatusFilter] = useState('전체')
+  const [statusFilter, setStatusFilter] = useState<AttendanceStatus | 'all'>('all')
   const [search, setSearch] = useState('')
   const [error, setError] = useState('')
 
   useEffect(() => {
     let ignore = false
-    async function loadClasses() {
+    async function load() {
       try {
-        const students = await apiFetch<ApiStudent[]>('/students?includeInactive=true')
-        if (!ignore) setClassOptions(studentClassOptions(students))
-      } catch {
-        if (!ignore) setClassOptions([])
-      }
-    }
-    loadClasses()
-    return () => { ignore = true }
-  }, [])
-
-  useEffect(() => {
-    if (classFilter !== 'all' && !classOptions.some((option) => String(option.id) === classFilter)) {
-      setClassFilter('all')
-    }
-  }, [classFilter, classOptions])
-
-  useEffect(() => {
-    let ignore = false
-    async function loadRecords() {
-      try {
-        const params = new URLSearchParams({ dateFrom: dateFilter, dateTo: dateFilter, period: String(periodFilter) })
-        if (classFilter !== 'all') params.set('classId', classFilter)
-        const rows = await apiFetch<ApiAttendanceRow[]>(`/attendance?${params.toString()}`)
+        const params = new URLSearchParams({ dateFrom: date, dateTo: date })
+        const [studentRows, attendanceRows] = await Promise.all([
+          apiFetch<ApiStudent[]>('/students'),
+          apiFetch<ApiAttendanceRow[]>(`/attendance?${params.toString()}`),
+        ])
         if (ignore) return
-        setRecords(rows.map(mapAttendanceRow))
+        setStudents(studentRows)
+        setRows(attendanceRows)
         setError('')
       } catch (err) {
         if (!ignore) setError(err instanceof Error ? err.message : '출석 기록을 불러오지 못했습니다.')
       }
     }
-    loadRecords()
+    load()
     return () => { ignore = true }
-  }, [dateFilter, classFilter, periodFilter])
+  }, [date])
 
-  const filtered = records.filter((r) => {
-    const matchDate = r.date === dateFilter
-    const matchStatus =
-      statusFilter === '전체' || STATUS_CONFIG[r.status].label === statusFilter
-    const matchSearch = !search || r.name.includes(search) || r.studentId.includes(search)
-    return matchDate && matchStatus && matchSearch
+  const classOptions: ClassOption[] = useMemo(() => studentClassOptions(students), [students])
+
+  useEffect(() => {
+    if (classFilter !== 'all' && !classOptions.some((option) => String(option.id) === classFilter)) setClassFilter('all')
+  }, [classFilter, classOptions])
+
+  const classStudents = students.filter((student) => classFilter === 'all' || String(student.classId) === classFilter)
+  const counts = PERIODS.length ? classStudents.reduce<Record<AttendanceStatus, number>>((result, student) => {
+    result[getCell(rows, student.id, focusPeriod).status] += 1
+    return result
+  }, { present: 0, late: 0, absent: 0, early: 0, result: 0, unset: 0 }) : { present: 0, late: 0, absent: 0, early: 0, result: 0, unset: 0 }
+
+  const filteredStudents = classStudents.filter((student) => {
+    const query = search.trim().toLowerCase()
+    const status = getCell(rows, student.id, focusPeriod).status
+    return (statusFilter === 'all' || status === statusFilter)
+      && (!query || student.name.toLowerCase().includes(query) || student.studentNumber.toLowerCase().includes(query))
   })
 
-  const counts = {
-    present: filtered.filter((r) => r.status === 'present').length,
-    late: filtered.filter((r) => r.status === 'late').length,
-    absent: filtered.filter((r) => r.status === 'absent').length,
-    early: filtered.filter((r) => r.status === 'early').length,
-    result: filtered.filter((r) => r.status === 'result').length,
-    unset: filtered.filter((r) => r.status === 'unset').length,
-  }
-
-  const downloadCsv = () => {
-    const params = new URLSearchParams({ dateFrom: dateFilter, dateTo: dateFilter, period: String(periodFilter) })
-    if (classFilter !== 'all') params.set('classId', classFilter)
-    window.location.href = `${API_BASE_URL}/attendance/export.csv?${params.toString()}`
+  function downloadCsv() {
+    const lines = [['date', 'class', 'studentNumber', 'studentName', 'period', 'status', 'reasonCategory', 'memo', 'source']]
+    for (const student of filteredStudents) {
+      for (const period of PERIODS) {
+        const cell = getCell(rows, student.id, period)
+        lines.push([
+          date,
+          student.className,
+          student.studentNumber,
+          student.name,
+          String(period),
+          STATUS_CONFIG[cell.status].label,
+          cell.reasonCategory ? REASON_LABEL[cell.reasonCategory] : '',
+          cell.note,
+          cell.verifiedByQr ? 'GPS+QR' : 'manual',
+        ])
+      }
+    }
+    const csv = `\uFEFF${lines.map((line) => line.map(csvCell).join(',')).join('\n')}`
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `attendance-${date}.csv`
+    anchor.click()
+    URL.revokeObjectURL(url)
   }
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="max-w-5xl mx-auto px-4 py-6 space-y-4">
-        {/* Header */}
+      <div className="mx-auto max-w-6xl space-y-4 px-4 py-6">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h1 className="text-gray-900">출석 기록</h1>
-            <p className="text-sm text-gray-500 mt-0.5">날짜별 출석 현황 조회</p>
+            <p className="mt-0.5 text-sm text-gray-500">학생별 교시 출석 현황 조회</p>
           </div>
-          <button onClick={downloadCsv} className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 rounded-xl px-3 py-2.5 text-sm hover:bg-gray-50 transition-colors shadow-sm">
-            <Download size={14} />
-            <span className="hidden sm:inline">CSV 다운로드</span>
+          <button onClick={downloadCsv} className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm hover:bg-gray-50">
+            <Download size={14} /> <span className="hidden sm:inline">CSV 다운로드</span>
           </button>
         </div>
 
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
-            {error}
-          </div>
-        )}
+        {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
 
-        {/* Filters row */}
-        <div className="flex flex-col sm:flex-row gap-2">
-          {/* Date filter */}
-          <div className="relative">
-            <Calendar size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-            <select
-              value={dateFilter}
-              onChange={(e) => setDateFilter(e.target.value)}
-              className="pl-8 pr-8 py-2.5 bg-white border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-gray-400 shadow-sm appearance-none cursor-pointer"
-            >
-              {DATES.map((d) => (
-                <option key={d} value={d}>
-                  {d.replace(/-/g, '. ')}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-          </div>
-
-          {/* Class filter */}
-          <div className="relative sm:min-w-44">
-            <select
-              value={classFilter}
-              onChange={(e) => setClassFilter(e.target.value)}
-              className="w-full pl-3 pr-8 py-2.5 bg-white border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-gray-400 shadow-sm appearance-none cursor-pointer"
-            >
-              <option value="all">전체 반</option>
-              {classOptions.map((cls) => (
-                <option key={cls.id} value={cls.id}>{cls.label}</option>
-              ))}
-            </select>
-            <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-          </div>
-
-          <div className="relative sm:min-w-24">
-            <select
-              value={periodFilter}
-              onChange={(e) => setPeriodFilter(Number(e.target.value))}
-              className="w-full pl-3 pr-8 py-2.5 bg-white border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-gray-400 shadow-sm appearance-none cursor-pointer"
-            >
-              {Array.from({ length: 8 }, (_, index) => index + 1).map((period) => (
-                <option key={period} value={period}>{period}교시</option>
-              ))}
-            </select>
-            <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-          </div>
-
-          {/* Search */}
-          <div className="relative flex-1 sm:max-w-48">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-            <input
-              type="text"
-              placeholder="이름, 학번 검색..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-8 pr-3 py-2.5 bg-white border border-gray-200 rounded-xl text-sm placeholder-gray-400 focus:outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-300 shadow-sm"
-            />
-          </div>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <label className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-sm">
+            <Calendar size={14} className="text-gray-400" />
+            <input type="date" value={date} onChange={(event) => setDate(event.target.value)} className="bg-transparent text-sm text-gray-700 outline-none" />
+          </label>
+          <select value={classFilter} onChange={(event) => setClassFilter(event.target.value)} className="min-w-36 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm outline-none">
+            <option value="all">전체 반</option>
+            {classOptions.map((option) => <option key={option.id} value={option.id}>{classShort(option.name)}</option>)}
+          </select>
+          <select value={focusPeriod} onChange={(event) => setFocusPeriod(Number(event.target.value))} className="min-w-28 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm outline-none" title="상태 집계 기준 교시">
+            {PERIODS.map((period) => <option key={period} value={period}>{period}교시 집계</option>)}
+          </select>
+          <label className="relative flex-1 sm:max-w-xs">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="이름, 학번 검색..." className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-9 pr-3 text-sm outline-none shadow-sm" />
+          </label>
         </div>
 
-        {/* Status filter tabs */}
-        <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
-          {STATUS_FILTER.map((s) => (
-            <button
-              key={s}
-              onClick={() => setStatusFilter(s)}
-              className={`shrink-0 px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                statusFilter === s
-                  ? 'bg-gray-900 text-white border-gray-900'
-                  : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
-              }`}
-            >
-              {s}
+        <div className="flex gap-1.5 overflow-x-auto">
+          <button onClick={() => setStatusFilter('all')} className={`shrink-0 rounded-lg border px-3 py-2 text-xs ${statusFilter === 'all' ? 'border-gray-900 bg-gray-900 text-white' : 'border-gray-200 bg-white text-gray-600'}`}>전체 {classStudents.length}</button>
+          {(Object.keys(STATUS_CONFIG) as AttendanceStatus[]).map((status) => (
+            <button key={status} onClick={() => setStatusFilter(status)} className={`shrink-0 rounded-lg border px-3 py-2 text-xs ${statusFilter === status ? 'border-gray-900 bg-gray-900 text-white' : STATUS_CONFIG[status].style}`}>
+              {STATUS_CONFIG[status].label} {counts[status]}
             </button>
           ))}
         </div>
 
-        {/* Summary mini-stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-8 gap-2">
-          {(Object.entries(counts) as [AttendanceStatus, number][]).map(([s, n]) => {
-            const c = STATUS_CONFIG[s]
-            return (
-              <div
-                key={s}
-                className={`rounded-xl border p-3 text-center ${c.bg} ${c.border}`}
-              >
-                <p className={`text-xl font-medium ${c.text}`}>{n}</p>
-                <p className={`text-xs mt-0.5 ${c.text} opacity-75`}>{c.label}</p>
+        <div className="rounded-lg border border-gray-200 bg-white shadow-sm">
+          <div className="overflow-x-auto">
+            <div className="min-w-[1140px]">
+              <div className="grid grid-cols-[220px_repeat(8,minmax(112px,1fr))] border-b border-gray-200 bg-gray-50 text-xs font-medium text-gray-500">
+                <div className="sticky left-0 z-20 border-r border-gray-200 bg-gray-50 px-4 py-3">학생</div>
+                {PERIODS.map((period) => <div key={period} className={`border-r border-gray-100 px-2 py-3 text-center last:border-r-0 ${period === focusPeriod ? 'bg-gray-100 text-gray-900' : ''}`}>{period}교시</div>)}
               </div>
-            )
-          })}
-        </div>
-
-        {/* Table */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          {/* Header */}
-          <div className="hidden md:grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_1fr] gap-3 items-center px-4 py-3 border-b border-gray-100 bg-gray-50">
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">학생</span>
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">학반</span>
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">교시</span>
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">상태</span>
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">처리 시각</span>
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">이탈 시각</span>
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">GPS+QR</span>
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">비고</span>
-          </div>
-
-          {/* Rows */}
-          <div className="divide-y divide-gray-50">
-            {filtered.length === 0 ? (
-              <div className="py-16 text-center">
-                <Filter size={24} className="text-gray-300 mx-auto mb-3" />
-                <p className="text-sm text-gray-400">해당 조건의 기록이 없습니다</p>
-              </div>
-            ) : (
-              filtered.map((r, i) => <AttendanceRow key={i} record={r} />)
-            )}
-          </div>
-
-          {/* Footer */}
-          <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
-            <span>{filtered.length}건 표시</span>
-            <div className="flex items-center gap-1.5">
-              <Shield size={11} className="text-green-500" />
-              <span>GPS+QR 인증</span>
-              <ShieldOff size={11} className="text-gray-400 ml-2" />
-              <span>수동 처리</span>
+              {filteredStudents.length === 0 ? (
+                <div className="py-16 text-center text-sm text-gray-400">해당 조건의 학생이 없습니다.</div>
+              ) : filteredStudents.map((student) => (
+                <div key={student.id} className="grid grid-cols-[220px_repeat(8,minmax(112px,1fr))] border-b border-gray-100 last:border-b-0">
+                  <div className="sticky left-0 z-10 flex min-h-24 items-center gap-3 border-r border-gray-200 bg-white px-4 py-3">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-100 text-gray-500"><User size={15} /></span>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-gray-900">{student.name}</p>
+                      <p className="text-xs text-gray-400">{classShort(student.className)} · {displayNumber(student.studentNumber)}번</p>
+                    </div>
+                  </div>
+                  {PERIODS.map((period) => <RecordCell key={period} value={getCell(rows, student.id, period)} focused={period === focusPeriod} />)}
+                </div>
+              ))}
             </div>
           </div>
+          <div className="flex items-center justify-between border-t border-gray-100 px-4 py-3 text-xs text-gray-400">
+            <span>{filteredStudents.length}명 표시</span>
+            <span className="flex items-center gap-3"><span className="flex items-center gap-1"><Shield size={11} className="text-green-500" /> GPS+QR</span><span className="flex items-center gap-1"><ShieldOff size={11} /> 수동</span></span>
+          </div>
         </div>
       </div>
     </div>
   )
 }
 
-function AttendanceRow({ record }: { record: Record_ }) {
-  const sc = STATUS_CONFIG[record.status]
-
+function RecordCell({ value, focused }: { value: AttendanceCellValue; focused: boolean }) {
+  const config = STATUS_CONFIG[value.status]
+  const details = [value.reasonCategory ? REASON_LABEL[value.reasonCategory] : '', value.note].filter(Boolean).join(' · ')
   return (
-    <div className="px-4 py-3 hover:bg-gray-50 transition-colors">
-      {/* Mobile layout */}
-          <div className="flex items-center gap-3 md:hidden">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-gray-900">{record.name}</span>
-            <span className="text-xs text-gray-400">{record.class} · {record.number}번 · {record.period}교시</span>
-          </div>
-          <div className="flex items-center gap-2 mt-0.5">
-            {record.checkIn && (
-              <span className="text-xs text-gray-500">처리 {record.checkIn}</span>
-            )}
-            {record.checkOut && (
-              <span className="text-xs text-gray-500">이탈 {record.checkOut}</span>
-            )}
-            {record.reasonCategory && <span className="text-xs text-gray-500">{REASON_LABEL[record.reasonCategory]}</span>}
-            {record.note && <span className="text-xs text-gray-400">— {record.note}</span>}
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {record.qrVerified ? (
-            <Shield size={13} className="text-green-500" />
-          ) : (
-            <ShieldOff size={13} className="text-gray-400" />
-          )}
-          <StatusChip status={record.status} />
-        </div>
+    <div className={`min-h-24 border-r border-gray-100 p-2 last:border-r-0 ${focused ? 'bg-gray-50' : ''}`}>
+      <div className={`flex items-center justify-center gap-1 rounded-md border px-2 py-2 text-xs font-medium ${config.style} ${value.inherited ? 'border-dashed' : ''}`}>
+        {config.icon} {config.label}
       </div>
-
-      {/* Desktop layout */}
-      <div className="hidden md:grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_1fr] gap-3 items-center">
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-gray-900">{record.name}</p>
-          <p className="text-xs text-gray-400">{record.studentId}</p>
-        </div>
-        <span className="text-sm text-gray-600">{record.class}반</span>
-        <span className="text-sm text-gray-600">{record.period}교시</span>
-        <StatusChip status={record.status} />
-        <span className="text-sm text-gray-700 font-medium tabular-nums">
-          {record.checkIn ?? '—'}
-        </span>
-        <span className="text-sm text-gray-500 tabular-nums">
-          {record.checkOut ?? '—'}
-        </span>
-        <div className="flex justify-center">
-          {record.qrVerified ? (
-            <span className="flex items-center gap-1 text-xs text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
-              <Shield size={10} />
-              인증
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-xs text-gray-500 bg-gray-100 border border-gray-200 rounded-full px-2 py-0.5">
-              <ShieldOff size={10} />
-              수동
-            </span>
-          )}
-        </div>
-        <span className="text-xs text-gray-500 truncate">
-          {[record.reasonCategory ? REASON_LABEL[record.reasonCategory] : '', record.note].filter(Boolean).join(' · ') || '—'}
-        </span>
-      </div>
+      {details && <p title={details} className="mt-1.5 truncate text-center text-[11px] text-gray-500">{details}</p>}
+      {value.verifiedAt && <p className="mt-1 text-center text-[10px] tabular-nums text-gray-400">{new Date(value.verifiedAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })}</p>}
+      {value.status !== 'unset' && <div className="mt-1 flex justify-center">{value.verifiedByQr ? <Shield size={10} className="text-green-500" /> : <ShieldOff size={10} className="text-gray-300" />}</div>}
     </div>
-  )
-}
-
-function StatusChip({ status }: { status: AttendanceStatus }) {
-  const c = STATUS_CONFIG[status]
-  return (
-    <span
-      className={`inline-flex items-center gap-1 text-xs border rounded-full px-2 py-0.5 font-medium ${c.bg} ${c.text} ${c.border}`}
-    >
-      {c.icon}
-      {c.label}
-    </span>
   )
 }
