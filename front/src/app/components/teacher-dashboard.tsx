@@ -12,6 +12,7 @@ import {
   ChevronRight,
   Shield,
   AlertCircle,
+  MapPin,
 } from 'lucide-react'
 import { AnimatePresence } from 'motion/react'
 import { ManualAttendanceModal } from './manual-attendance-modal'
@@ -26,8 +27,10 @@ const EMPTY_STATS = {
   late: 0,
   absent: 0,
   early: 0,
+  outing: 0,
   excused: 0,
   sick: 0,
+  unprocessed: 0,
 }
 
 type DashboardStats = typeof EMPTY_STATS
@@ -37,7 +40,7 @@ type RecentItem = {
   class: string
   number: string
   time: string
-  status: 'present' | 'late' | 'absent' | 'early' | 'excused' | 'sick'
+  status: 'present' | 'late' | 'absent' | 'early' | 'outing' | 'excused' | 'sick' | 'unset'
   gps: boolean
 }
 
@@ -46,8 +49,10 @@ const STATUS_LABEL: Record<string, string> = {
   late: '지각',
   absent: '결석',
   early: '조퇴',
+  outing: '외출',
   excused: '공결',
   sick: '병결',
+  unset: '미처리',
 }
 
 const STATUS_COLORS: Record<string, { bg: string; text: string; border: string; bar: string; dot: string }> = {
@@ -55,11 +60,13 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string; 
   late: { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', bar: 'bg-amber-400', dot: 'bg-amber-500' },
   absent: { bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', bar: 'bg-red-500', dot: 'bg-red-500' },
   early: { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', bar: 'bg-blue-500', dot: 'bg-blue-500' },
+  outing: { bg: 'bg-cyan-50', text: 'text-cyan-700', border: 'border-cyan-200', bar: 'bg-cyan-500', dot: 'bg-cyan-500' },
   excused: { bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200', bar: 'bg-indigo-500', dot: 'bg-indigo-500' },
   sick: { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', bar: 'bg-rose-500', dot: 'bg-rose-500' },
+  unset: { bg: 'bg-gray-50', text: 'text-gray-600', border: 'border-gray-200', bar: 'bg-gray-400', dot: 'bg-gray-400' },
 }
 
-const DASHBOARD_STATUSES = ['present', 'late', 'absent', 'early', 'excused', 'sick'] as const
+const DASHBOARD_STATUSES = ['present', 'late', 'absent', 'early', 'outing', 'excused', 'sick'] as const
 
 type ApiStudentClass = { classId: number; className: string }
 type ApiClass = { id: number; name: string }
@@ -67,7 +74,7 @@ type ApiClass = { id: number; name: string }
 type ApiSummary = {
   date: string
   classId: number | null
-  summary: { total: number; present: number; late: number; absent: number; earlyLeave: number; excused?: number; sick?: number }
+  summary: { total: number; present: number; late: number; absent: number; earlyLeave: number; outing?: number; excused?: number; sick?: number; unprocessed?: number }
   recentScans: {
     studentName: string
     studentNumber?: string
@@ -84,9 +91,11 @@ type WeeklyDay = {
   present: number
   late: number
   earlyLeave: number
+  outing?: number
   absent: number
   excused?: number
   sick?: number
+  unprocessed?: number
   attended: number
   rate: number
 }
@@ -122,6 +131,7 @@ function classOptionsFromStudents(students: ApiStudentClass[]) {
 export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }) {
   const [manualOpen, setManualOpen] = useState(false)
   const [date] = useState(todayString())
+  const [period, setPeriod] = useState(1)
   const [classes, setClasses] = useState<ApiClass[]>([])
   const [selectedClassId, setSelectedClassId] = useState<number | null>(null)
   const [stats, setStats] = useState<DashboardStats>(EMPTY_STATS)
@@ -137,6 +147,7 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
     async function loadDashboard() {
       try {
         const params = new URLSearchParams({ date })
+        params.set('period', String(period))
         if (selectedClassId) params.set('classId', String(selectedClassId))
         const [students, summary, weeklySummary] = await Promise.all([
           apiFetch<ApiStudentClass[]>('/students'),
@@ -155,8 +166,10 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
           late: summary.summary.late,
           absent: summary.summary.absent,
           early: summary.summary.earlyLeave,
+          outing: summary.summary.outing || 0,
           excused: summary.summary.excused || 0,
           sick: summary.summary.sick || 0,
+          unprocessed: summary.summary.unprocessed || 0,
         })
         setRecent(summary.recentScans.map((scan) => ({
           name: scan.studentName,
@@ -179,7 +192,7 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
       ignore = true
       window.clearInterval(timer)
     }
-  }, [date, selectedClassId])
+  }, [date, period, selectedClassId])
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -200,7 +213,7 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
         </div>
 
         {/* Class selector */}
-        <div className="max-w-xs">
+        <div className="flex flex-col sm:flex-row gap-2 max-w-md">
           <select
             value={selectedClassId ?? 'all'}
             onChange={(e) => setSelectedClassId(e.target.value === 'all' ? null : Number(e.target.value))}
@@ -209,6 +222,15 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
             <option value="all">전체 반</option>
             {classes.map((cls) => (
               <option key={cls.id} value={cls.id}>{classShort(cls.name)}</option>
+            ))}
+          </select>
+          <select
+            value={period}
+            onChange={(e) => setPeriod(Number(e.target.value))}
+            className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm focus:outline-none focus:border-gray-400"
+          >
+            {Array.from({ length: 8 }, (_, index) => index + 1).map((value) => (
+              <option key={value} value={value}>{value}교시</option>
             ))}
           </select>
         </div>
@@ -220,7 +242,7 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
         )}
 
         {/* Stat cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-9 gap-3">
           <StatCard
             label="전체 학생"
             value={stats.total}
@@ -266,6 +288,15 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
             highlight="blue"
           />
           <StatCard
+            label="외출"
+            value={stats.outing}
+            unit="명"
+            icon={<MapPin size={16} />}
+            iconBg="bg-cyan-100"
+            iconColor="text-cyan-600"
+            highlight="cyan"
+          />
+          <StatCard
             label="공결"
             value={stats.excused}
             unit="명"
@@ -282,6 +313,15 @@ export function TeacherDashboardPage({ onGoToScan }: { onGoToScan?: () => void }
             iconBg="bg-rose-100"
             iconColor="text-rose-600"
             highlight="rose"
+          />
+          <StatCard
+            label="미처리"
+            value={stats.unprocessed}
+            unit="명"
+            icon={<AlertCircle size={16} />}
+            iconBg="bg-gray-100"
+            iconColor="text-gray-600"
+            highlight="gray"
           />
         </div>
 
@@ -453,7 +493,7 @@ function StatCard({
   icon: ReactNode
   iconBg: string
   iconColor: string
-  highlight?: 'green' | 'amber' | 'red' | 'blue' | 'indigo' | 'rose'
+  highlight?: 'green' | 'amber' | 'red' | 'blue' | 'cyan' | 'indigo' | 'rose' | 'gray'
   className?: string
 }) {
   const highlightBorder = {
@@ -461,8 +501,10 @@ function StatCard({
     amber: 'border-amber-200',
     red: 'border-red-200',
     blue: 'border-blue-200',
+    cyan: 'border-cyan-200',
     indigo: 'border-indigo-200',
     rose: 'border-rose-200',
+    gray: 'border-gray-200',
   }
   return (
     <div

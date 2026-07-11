@@ -41,6 +41,7 @@ export function AttendancePolicyPage() {
   const [classPolicies, setClassPolicies] = useState<Record<number, ClassPolicy>>({})
   const [closeDate, setCloseDate] = useState(todayString())
   const [closeClassId, setCloseClassId] = useState('')
+  const [closePeriod, setClosePeriod] = useState(1)
   const [autoCreateAbsent, setAutoCreateAbsent] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -117,7 +118,7 @@ export function AttendancePolicyPage() {
 
   const closeAttendance = async () => {
     const targetLabel = closeClassId ? classes.find((cls) => cls.id === Number(closeClassId))?.name || '선택 반' : '전체 반'
-    if (!window.confirm(`${closeDate} / ${targetLabel} 출석을 마감할까요?\n마감 후에는 QR 발급과 수동 수정이 제한됩니다.`)) return
+    if (!window.confirm(`${closeDate} / ${targetLabel} / ${closePeriod}교시 출석을 마감할까요?\n마감 후에는 QR 발급과 수동 수정이 제한됩니다.`)) return
     setSaving(true)
     setMessage('')
     setError('')
@@ -127,10 +128,11 @@ export function AttendancePolicyPage() {
         body: JSON.stringify({
           date: closeDate,
           classId: closeClassId ? Number(closeClassId) : null,
+          period: closePeriod,
           autoCreateAbsent,
         }),
       })
-      setMessage(`출석을 마감했습니다. 자동 결석 ${result.createdAbsentCount}건`)
+      setMessage(`${closePeriod}교시 출석을 마감했습니다. 자동 결석 ${result.createdAbsentCount}건`)
     } catch (err) {
       setError(err instanceof Error ? err.message : '출석 마감에 실패했습니다.')
     } finally {
@@ -140,7 +142,7 @@ export function AttendancePolicyPage() {
 
   const reopenAttendance = async () => {
     const targetLabel = closeClassId ? classes.find((cls) => cls.id === Number(closeClassId))?.name || '선택 반' : '전체 반'
-    if (!window.confirm(`${closeDate} / ${targetLabel} 출석 마감을 취소할까요?\n취소하면 다시 QR 발급과 수동 수정이 가능합니다.`)) return
+    if (!window.confirm(`${closeDate} / ${targetLabel} / ${closePeriod}교시 출석 마감을 취소할까요?\n취소하면 다시 QR 발급과 수동 수정이 가능합니다.`)) return
     setSaving(true)
     setMessage('')
     setError('')
@@ -150,9 +152,10 @@ export function AttendancePolicyPage() {
         body: JSON.stringify({
           date: closeDate,
           classId: closeClassId ? Number(closeClassId) : null,
+          period: closePeriod,
         }),
       })
-      setMessage(result.deletedCount > 0 ? '출석 마감을 취소했습니다.' : '해당 날짜/반에 마감 기록이 없습니다.')
+      setMessage(result.deletedCount > 0 ? `${closePeriod}교시 출석 마감을 취소했습니다.` : '해당 날짜/반/교시에 마감 기록이 없습니다.')
     } catch (err) {
       setError(err instanceof Error ? err.message : '출석 마감 취소에 실패했습니다.')
     } finally {
@@ -233,8 +236,8 @@ export function AttendancePolicyPage() {
         </section>
 
         <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <SectionHeader icon={<ShieldCheck size={17} />} title="출석 마감" desc="선택한 날짜/반의 QR 발급과 수동 출석 수정을 잠그거나 다시 열 수 있습니다" />
-          <div className="p-5 grid md:grid-cols-[180px_1fr_auto_auto_auto] gap-3 items-end">
+          <SectionHeader icon={<ShieldCheck size={17} />} title="출석 마감" desc="선택한 날짜, 반, 교시의 QR 발급과 수동 출석 수정을 잠그거나 다시 열 수 있습니다" />
+          <div className="p-5 grid md:grid-cols-[180px_1fr_110px_auto_auto_auto] gap-3 items-end">
             <label className="space-y-1.5">
               <span className="text-sm font-medium text-gray-700">날짜</span>
               <input type="date" value={closeDate} onChange={(e) => setCloseDate(e.target.value)} className={inputClass} />
@@ -244,6 +247,12 @@ export function AttendancePolicyPage() {
               <select value={closeClassId} onChange={(e) => setCloseClassId(e.target.value)} className={inputClass}>
                 <option value="">전체 반</option>
                 {classes.map((cls) => <option key={cls.id} value={cls.id}>{cls.name}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1.5">
+              <span className="text-sm font-medium text-gray-700">교시</span>
+              <select value={closePeriod} onChange={(e) => setClosePeriod(Number(e.target.value))} className={inputClass}>
+                {Array.from({ length: 8 }, (_, index) => index + 1).map((period) => <option key={period} value={period}>{period}교시</option>)}
               </select>
             </label>
             <label className="flex items-center gap-2 py-2.5 text-sm text-gray-700">

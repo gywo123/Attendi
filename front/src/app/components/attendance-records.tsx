@@ -14,11 +14,12 @@ import {
   AlertCircle,
   ChevronDown,
   Search,
+  MapPin,
 } from 'lucide-react'
 import { API_BASE_URL, apiFetch } from '../lib/api'
 import { classShort, studentClassOptions, type ClassOption } from '../lib/classes'
 
-type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'excused' | 'sick'
+type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'outing' | 'excused' | 'sick' | 'unset'
 
 type Record_ = {
   studentId: string
@@ -27,6 +28,7 @@ type Record_ = {
   class: string
   number: number
   date: string
+  period: number
   status: AttendanceStatus
   checkIn: string | null
   checkOut: string | null
@@ -39,13 +41,15 @@ const DATES = Array.from({ length: 7 }, (_, index) => {
   date.setDate(date.getDate() - index)
   return date.toISOString().slice(0, 10)
 })
-const STATUS_FILTER = ['전체', '출석', '지각', '결석', '조퇴', '공결', '병결']
+const STATUS_FILTER = ['전체', '미처리', '출석', '지각', '결석', '조퇴', '외출', '공결', '병결']
 
 const STATUS_CONFIG: Record<AttendanceStatus, { label: string; bg: string; text: string; border: string; icon: ReactNode }> = {
+  unset: { label: '미처리', bg: 'bg-gray-50', text: 'text-gray-600', border: 'border-gray-200', icon: <AlertCircle size={11} /> },
   present: { label: '출석', bg: 'bg-green-50', text: 'text-green-700', border: 'border-green-200', icon: <CheckCircle2 size={11} /> },
   late: { label: '지각', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', icon: <Clock size={11} /> },
   absent: { label: '결석', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', icon: <XCircle size={11} /> },
   early: { label: '조퇴', bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', icon: <LogOut size={11} /> },
+  outing: { label: '외출', bg: 'bg-cyan-50', text: 'text-cyan-700', border: 'border-cyan-200', icon: <MapPin size={11} /> },
   excused: { label: '공결', bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200', icon: <FileText size={11} /> },
   sick: { label: '병결', bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', icon: <AlertCircle size={11} /> },
 }
@@ -58,6 +62,7 @@ type ApiAttendanceRow = {
   classId: number
   className: string
   date: string
+  period?: number
   status: AttendanceStatus
   verifiedByQr: boolean
   verifiedAt: string | null
@@ -87,9 +92,10 @@ function mapAttendanceRow(row: ApiAttendanceRow): Record_ {
     class: classShort(row.className),
     number: displayNumber(row.studentNumber),
     date: row.date,
+    period: Number(row.period || 1),
     status: row.status,
     checkIn: timeOnly(row.verifiedAt),
-    checkOut: row.status === 'early' ? timeOnly(row.verifiedAt) : null,
+    checkOut: row.status === 'early' || row.status === 'outing' ? timeOnly(row.verifiedAt) : null,
     qrVerified: row.verifiedByQr,
     note: row.memo || '',
   }
@@ -99,6 +105,7 @@ export function AttendanceRecordsPage() {
   const [records, setRecords] = useState<Record_[]>([])
   const [classOptions, setClassOptions] = useState<ClassOption[]>([])
   const [dateFilter, setDateFilter] = useState(DATES[0])
+  const [periodFilter, setPeriodFilter] = useState(1)
   const [classFilter, setClassFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('전체')
   const [search, setSearch] = useState('')
@@ -128,7 +135,7 @@ export function AttendanceRecordsPage() {
     let ignore = false
     async function loadRecords() {
       try {
-        const params = new URLSearchParams({ dateFrom: dateFilter, dateTo: dateFilter })
+        const params = new URLSearchParams({ dateFrom: dateFilter, dateTo: dateFilter, period: String(periodFilter) })
         if (classFilter !== 'all') params.set('classId', classFilter)
         const rows = await apiFetch<ApiAttendanceRow[]>(`/attendance?${params.toString()}`)
         if (ignore) return
@@ -140,7 +147,7 @@ export function AttendanceRecordsPage() {
     }
     loadRecords()
     return () => { ignore = true }
-  }, [dateFilter, classFilter])
+  }, [dateFilter, classFilter, periodFilter])
 
   const filtered = records.filter((r) => {
     const matchDate = r.date === dateFilter
@@ -155,12 +162,14 @@ export function AttendanceRecordsPage() {
     late: filtered.filter((r) => r.status === 'late').length,
     absent: filtered.filter((r) => r.status === 'absent').length,
     early: filtered.filter((r) => r.status === 'early').length,
+    outing: filtered.filter((r) => r.status === 'outing').length,
     excused: filtered.filter((r) => r.status === 'excused').length,
     sick: filtered.filter((r) => r.status === 'sick').length,
+    unset: filtered.filter((r) => r.status === 'unset').length,
   }
 
   const downloadCsv = () => {
-    const params = new URLSearchParams({ dateFrom: dateFilter, dateTo: dateFilter })
+    const params = new URLSearchParams({ dateFrom: dateFilter, dateTo: dateFilter, period: String(periodFilter) })
     if (classFilter !== 'all') params.set('classId', classFilter)
     window.location.href = `${API_BASE_URL}/attendance/export.csv?${params.toString()}`
   }
@@ -220,6 +229,19 @@ export function AttendanceRecordsPage() {
             <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
           </div>
 
+          <div className="relative sm:min-w-24">
+            <select
+              value={periodFilter}
+              onChange={(e) => setPeriodFilter(Number(e.target.value))}
+              className="w-full pl-3 pr-8 py-2.5 bg-white border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-gray-400 shadow-sm appearance-none cursor-pointer"
+            >
+              {Array.from({ length: 8 }, (_, index) => index + 1).map((period) => (
+                <option key={period} value={period}>{period}교시</option>
+              ))}
+            </select>
+            <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          </div>
+
           {/* Search */}
           <div className="relative flex-1 sm:max-w-48">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
@@ -251,7 +273,7 @@ export function AttendanceRecordsPage() {
         </div>
 
         {/* Summary mini-stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-8 gap-2">
           {(Object.entries(counts) as [AttendanceStatus, number][]).map(([s, n]) => {
             const c = STATUS_CONFIG[s]
             return (
@@ -269,12 +291,13 @@ export function AttendanceRecordsPage() {
         {/* Table */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           {/* Header */}
-          <div className="hidden md:grid grid-cols-[1fr_auto_auto_auto_auto_auto_1fr] gap-3 items-center px-4 py-3 border-b border-gray-100 bg-gray-50">
+          <div className="hidden md:grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_1fr] gap-3 items-center px-4 py-3 border-b border-gray-100 bg-gray-50">
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">학생</span>
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">학반</span>
+            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">교시</span>
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">상태</span>
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">등교 시각</span>
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">하교 시각</span>
+            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">처리 시각</span>
+            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">이탈 시각</span>
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">GPS+QR</span>
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">비고</span>
           </div>
@@ -313,18 +336,18 @@ function AttendanceRow({ record }: { record: Record_ }) {
   return (
     <div className="px-4 py-3 hover:bg-gray-50 transition-colors">
       {/* Mobile layout */}
-      <div className="flex items-center gap-3 md:hidden">
+          <div className="flex items-center gap-3 md:hidden">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-gray-900">{record.name}</span>
-            <span className="text-xs text-gray-400">{record.class} · {record.number}번</span>
+            <span className="text-xs text-gray-400">{record.class} · {record.number}번 · {record.period}교시</span>
           </div>
           <div className="flex items-center gap-2 mt-0.5">
             {record.checkIn && (
-              <span className="text-xs text-gray-500">등교 {record.checkIn}</span>
+              <span className="text-xs text-gray-500">처리 {record.checkIn}</span>
             )}
             {record.checkOut && (
-              <span className="text-xs text-gray-500">하교 {record.checkOut}</span>
+              <span className="text-xs text-gray-500">이탈 {record.checkOut}</span>
             )}
             {record.note && (
               <span className="text-xs text-gray-400">— {record.note}</span>
@@ -342,12 +365,13 @@ function AttendanceRow({ record }: { record: Record_ }) {
       </div>
 
       {/* Desktop layout */}
-      <div className="hidden md:grid grid-cols-[1fr_auto_auto_auto_auto_auto_1fr] gap-3 items-center">
+      <div className="hidden md:grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_1fr] gap-3 items-center">
         <div className="min-w-0">
           <p className="text-sm font-medium text-gray-900">{record.name}</p>
           <p className="text-xs text-gray-400">{record.studentId}</p>
         </div>
         <span className="text-sm text-gray-600">{record.class}반</span>
+        <span className="text-sm text-gray-600">{record.period}교시</span>
         <StatusChip status={record.status} />
         <span className="text-sm text-gray-700 font-medium tabular-nums">
           {record.checkIn ?? '—'}

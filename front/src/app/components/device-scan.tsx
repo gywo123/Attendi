@@ -114,6 +114,7 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
   const [scanState, setScanState] = useState<ScanState>('idle')
   const [scannerStatus, setScannerStatus] = useState<ScannerStatus>('checking')
   const [scanMessage, setScanMessage] = useState('카메라를 준비하고 있습니다.')
+  const [period, setPeriod] = useState(1)
   const [time, setTime] = useState(new Date())
   const [recentScans, setRecentScans] = useState<RecentScan[]>([])
   const [lastScan, setLastScan] = useState<RecentScan | null>(null)
@@ -121,6 +122,7 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
   const scannerRef = useRef<Html5Qrcode | null>(null)
   const scanBusyRef = useRef(false)
   const lastDecodedRef = useRef('')
+  const periodRef = useRef(1)
 
   useEffect(() => {
     const iv = setInterval(() => setTime(new Date()), 1000)
@@ -198,7 +200,7 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
               const result = await apiFetch<VerifyResult>('/qr-sessions/verify', {
                 method: 'POST',
                 headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
-                body: JSON.stringify({ qrPayload: decodedText }),
+                body: JSON.stringify({ qrPayload: decodedText, period: periodRef.current }),
               })
               if (cancelled) return
               handleScan(result.status === 'late' ? 'late' : 'success', toRecentScan(result), 'QR 코드 인증이 완료되었습니다.')
@@ -283,6 +285,20 @@ export function DeviceScanPage({ accessToken }: { accessToken?: string }) {
         </div>
 
         <div className="flex items-center gap-4">
+          <select
+            value={period}
+            onChange={(event) => {
+              const nextPeriod = Number(event.target.value)
+              periodRef.current = nextPeriod
+              setPeriod(nextPeriod)
+            }}
+            className="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-xs text-white/85 outline-none"
+            aria-label="현재 출석 교시"
+          >
+            {Array.from({ length: 8 }, (_, index) => index + 1).map((value) => (
+              <option key={value} value={value} className="bg-slate-900">{value}교시</option>
+            ))}
+          </select>
           <div className="flex items-center gap-1.5 text-xs text-white/40">
             <Wifi size={12} className="text-green-400" />
             <span>연결됨</span>

@@ -2,7 +2,7 @@ import { col, insertDoc, publicDoc, publicDocs } from './db.js'
 import { now } from './time.js'
 import { hashToken } from './security.js'
 
-export const ATTENDANCE_STATUSES = ['present', 'late', 'absent', 'early_leave', 'excused', 'sick']
+export const ATTENDANCE_STATUSES = ['present', 'late', 'absent', 'early_leave', 'outing', 'excused', 'sick', 'unset']
 
 export async function getStudentFromRequest(req) {
   if (req.user?.role === 'student') {
@@ -72,7 +72,7 @@ export function displayStudentNumber(studentNumber = '') {
 }
 
 export async function readAttendanceRows(query = {}) {
-  const { dateFrom, dateTo, classId, studentId, status } = query
+  const { dateFrom, dateTo, classId, studentId, status, period } = query
   const filter = {}
   if (dateFrom || dateTo) {
     filter.date = {}
@@ -85,6 +85,7 @@ export async function readAttendanceRows(query = {}) {
     filter.studentId = student?.id || Number(studentId)
   }
   if (status) filter.status = toDbStatus(status)
+  if (period) filter.period = Number(period)
 
   const rows = publicDocs(await col('attendanceRecords').find(filter).sort({ date: -1, verifiedAt: -1, id: -1 }).toArray())
   return Promise.all(rows.map(withAttendanceNames))
@@ -160,11 +161,12 @@ export async function getEffectiveAttendancePolicy(classId) {
   }
 }
 
-export async function isAttendanceClosed(date, classId) {
+export async function isAttendanceClosed(date, classId, period = 1) {
   const targetDate = String(date)
   const targetClassId = Number(classId)
   const closure = await col('attendanceClosures').findOne({
     date: targetDate,
+    period: Number(period),
     $or: [{ classId: targetClassId }, { classId: null }],
   })
   return Boolean(closure)
@@ -175,8 +177,8 @@ export async function isPastAttendanceCloseTime({ classId, at = new Date() } = {
   return timeInSeoul(at) > policy.closeTime
 }
 
-export async function upsertAttendanceClosure({ date, classId = null, closedBy = null }) {
-  const filter = { date: String(date), classId: classId === null ? null : Number(classId) }
+export async function upsertAttendanceClosure({ date, classId = null, period = 1, closedBy = null }) {
+  const filter = { date: String(date), classId: classId === null ? null : Number(classId), period: Number(period) }
   await col('attendanceClosures').updateOne(
     filter,
     { $set: { ...filter, closedBy, closedAt: now() } },
@@ -185,8 +187,8 @@ export async function upsertAttendanceClosure({ date, classId = null, closedBy =
   return publicDoc(await col('attendanceClosures').findOne(filter))
 }
 
-export async function deleteAttendanceClosure({ date, classId = null }) {
-  const filter = { date: String(date), classId: classId === null ? null : Number(classId) }
+export async function deleteAttendanceClosure({ date, classId = null, period = 1 }) {
+  const filter = { date: String(date), classId: classId === null ? null : Number(classId), period: Number(period) }
   const result = await col('attendanceClosures').deleteOne(filter)
   return { ...filter, deletedCount: result.deletedCount || 0 }
 }

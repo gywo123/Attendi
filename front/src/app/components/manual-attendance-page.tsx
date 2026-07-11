@@ -17,13 +17,14 @@ import {
   Users,
   Pencil,
   X,
+  MapPin,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
 import { apiFetch } from '../lib/api'
 import { TimeInput } from './manual-attendance/time-input'
 import { sortClassLabels } from '../lib/classes'
 
-type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'excused' | 'sick' | 'unset'
+type AttendanceStatus = 'present' | 'late' | 'absent' | 'early' | 'outing' | 'excused' | 'sick' | 'unset'
 
 type StudentRecord = {
   id: string
@@ -35,6 +36,7 @@ type StudentRecord = {
   status: AttendanceStatus
   time: string
   note: string
+  inherited: boolean
 }
 
 const STATUS_OPTIONS: {
@@ -44,10 +46,12 @@ const STATUS_OPTIONS: {
   activeBg: string
   dot: string
 }[] = [
+  { value: 'unset',   label: '미처리', icon: <AlertCircle size={13} />, activeBg: 'bg-gray-50 border-gray-300 text-gray-600', dot: 'bg-gray-400' },
   { value: 'present', label: '출석', icon: <CheckCircle2 size={13} />, activeBg: 'bg-green-50 border-green-300 text-green-700', dot: 'bg-green-500' },
   { value: 'late',    label: '지각', icon: <Clock size={13} />,         activeBg: 'bg-amber-50 border-amber-300 text-amber-700',   dot: 'bg-amber-500' },
   { value: 'absent',  label: '결석', icon: <XCircle size={13} />,       activeBg: 'bg-red-50 border-red-300 text-red-700',         dot: 'bg-red-500'   },
   { value: 'early',   label: '조퇴', icon: <LogOut size={13} />,        activeBg: 'bg-blue-50 border-blue-300 text-blue-700',      dot: 'bg-blue-500'  },
+  { value: 'outing',  label: '외출', icon: <MapPin size={13} />,         activeBg: 'bg-cyan-50 border-cyan-300 text-cyan-700',       dot: 'bg-cyan-500'  },
   { value: 'excused', label: '공결', icon: <FileText size={13} />,      activeBg: 'bg-indigo-50 border-indigo-300 text-indigo-700', dot: 'bg-indigo-500' },
   { value: 'sick',    label: '병결', icon: <AlertCircle size={13} />,   activeBg: 'bg-rose-50 border-rose-300 text-rose-700',      dot: 'bg-rose-500'  },
 ]
@@ -63,7 +67,8 @@ type ApiStudent = {
 
 type ApiAttendanceRow = {
   studentId: number
-  status: Exclude<AttendanceStatus, 'unset'>
+  status: AttendanceStatus
+  period?: number
   verifiedAt: string | null
   memo: string | null
 }
@@ -82,11 +87,11 @@ function displayNumber(studentNumber: string) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : Number(studentNumber) || 1
 }
 
-function makeRecords(source: Omit<StudentRecord, 'status' | 'time' | 'note'>[]): StudentRecord[] {
-  return source.map((s) => ({ ...s, status: 'unset', time: DEFAULT_TIME, note: '' }))
+function makeRecords(source: Omit<StudentRecord, 'status' | 'time' | 'note' | 'inherited'>[]): StudentRecord[] {
+  return source.map((s) => ({ ...s, status: 'unset', time: DEFAULT_TIME, note: '', inherited: false }))
 }
 
-function mapStudent(row: ApiStudent): Omit<StudentRecord, 'status' | 'time' | 'note'> {
+function mapStudent(row: ApiStudent): Omit<StudentRecord, 'status' | 'time' | 'note' | 'inherited'> {
   const shortClass = classShort(row.className)
   const [grade = '3'] = shortClass.split('-')
   return {
@@ -106,23 +111,27 @@ function timeFromIso(value: string | null) {
   return parsed.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-function mergeSavedAttendance(records: StudentRecord[], savedRows: ApiAttendanceRow[]) {
-  const savedByStudentId = new Map(savedRows.map((row) => [String(row.studentId), row]))
+function mergeSavedAttendance(records: StudentRecord[], savedRows: ApiAttendanceRow[], period: number) {
   return records.map((record) => {
-    const saved = savedByStudentId.get(record.id)
+    const saved = savedRows
+      .filter((row) => String(row.studentId) === record.id && Number(row.period || 1) <= period)
+      .sort((a, b) => Number(b.period || 1) - Number(a.period || 1))[0]
     if (!saved) return record
     return {
       ...record,
       status: saved.status,
       time: timeFromIso(saved.verifiedAt),
       note: saved.memo || '',
+      inherited: Number(saved.period || 1) < period,
     }
   })
 }
 
 export function ManualAttendancePage() {
   const [records, setRecords] = useState<StudentRecord[]>([])
+  const [baselineRecords, setBaselineRecords] = useState<StudentRecord[]>([])
   const [date, setDate] = useState(todayString())
+  const [period, setPeriod] = useState(1)
   const [classFilter, setClassFilter] = useState('전체')
   const [statusFilter, setStatusFilter] = useState<AttendanceStatus | 'unset' | 'all'>('all')
   const [search, setSearch] = useState('')
@@ -142,7 +151,9 @@ export function ManualAttendancePage() {
           apiFetch<ApiAttendanceRow[]>(`/attendance?${params.toString()}`),
         ])
         if (!ignore) {
-          setRecords(mergeSavedAttendance(makeRecords(rows.map(mapStudent)), savedRows))
+          const merged = mergeSavedAttendance(makeRecords(rows.map(mapStudent)), savedRows, period)
+          setRecords(merged)
+          setBaselineRecords(merged)
           setSelected(new Set())
           setErrorMsg('')
         }
@@ -152,7 +163,7 @@ export function ManualAttendancePage() {
     }
     loadStudentsAndAttendance()
     return () => { ignore = true }
-  }, [date])
+  }, [date, period])
 
   const now = new Date()
   const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
@@ -180,6 +191,7 @@ export function ManualAttendancePage() {
     late:    records.filter((r) => r.status === 'late').length,
     absent:  records.filter((r) => r.status === 'absent').length,
     early:   records.filter((r) => r.status === 'early').length,
+    outing:  records.filter((r) => r.status === 'outing').length,
     excused: records.filter((r) => r.status === 'excused').length,
     sick:    records.filter((r) => r.status === 'sick').length,
     unset:   records.filter((r) => r.status === 'unset').length,
@@ -190,7 +202,7 @@ export function ManualAttendancePage() {
 
   const applyBulk = (ids: string[], status: AttendanceStatus) => {
     setRecords((prev) =>
-      prev.map((r) => ids.includes(r.id) ? { ...r, status, time: currentTime } : r)
+      prev.map((r) => ids.includes(r.id) ? { ...r, status, time: currentTime, inherited: false } : r)
     )
     setSelected(new Set())
   }
@@ -202,7 +214,7 @@ export function ManualAttendancePage() {
     applyBulk(Array.from(selected), status)
 
   const resetAll = () => {
-    setRecords((prev) => prev.map((r) => ({ ...r, status: 'unset', time: DEFAULT_TIME, note: '' })))
+    setRecords(baselineRecords.map((record) => ({ ...record })))
     setSelected(new Set())
     setSavedMsg('')
   }
@@ -219,12 +231,12 @@ export function ManualAttendancePage() {
   const handleSave = async () => {
     setSaving(true)
     try {
-      const processed = records.filter((r) => r.status !== 'unset')
       const result = await apiFetch<{ savedCount: number }>('/attendance/manual', {
         method: 'POST',
         body: JSON.stringify({
           date,
-          records: processed.map((r) => ({
+          period,
+          records: records.map((r) => ({
             studentId: r.id,
             status: r.status,
             time: r.time,
@@ -232,7 +244,10 @@ export function ManualAttendancePage() {
           })),
         }),
       })
-      setSavedMsg(`${date.replace(/-/g, '. ')} 출석 ${result.savedCount}건이 저장되었습니다.`)
+      const savedRecords = records.map((record) => ({ ...record, inherited: false }))
+      setRecords(savedRecords)
+      setBaselineRecords(savedRecords)
+      setSavedMsg(`${date.replace(/-/g, '. ')} ${period}교시 출석 ${result.savedCount}건이 저장되었습니다.`)
       setErrorMsg('')
       setTimeout(() => setSavedMsg(''), 3500)
     } catch (err) {
@@ -253,28 +268,8 @@ export function ManualAttendancePage() {
           <div>
             <h1 className="text-gray-900">수동 출석 처리</h1>
             <p className="text-sm text-gray-500 mt-0.5">
-              날짜와 반을 선택하고 학생별 출석 상태를 직접 입력하세요
+              날짜, 교시와 반을 선택하고 학생별 출석 상태를 직접 입력하세요
             </p>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={resetAll}
-              className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 rounded-xl px-3 py-2 text-sm hover:bg-gray-50 transition-colors shadow-sm"
-            >
-              <RotateCcw size={13} />
-              초기화
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={saving || processedCount === 0}
-              className="flex items-center gap-1.5 bg-gray-900 text-white rounded-xl px-4 py-2 text-sm hover:bg-gray-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {saving ? (
-                <><span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />저장 중...</>
-              ) : (
-                <><Save size={13} />저장하기</>
-              )}
-            </button>
           </div>
         </div>
 
@@ -304,18 +299,29 @@ export function ManualAttendancePage() {
               <option key={cls} value={cls}>{cls === '전체' ? '전체 반' : cls}</option>
             ))}
           </select>
+          <select
+            value={period}
+            onChange={(e) => setPeriod(Number(e.target.value))}
+            className="min-w-28 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm focus:outline-none focus:border-gray-400"
+          >
+            {Array.from({ length: 8 }, (_, index) => index + 1).map((value) => (
+              <option key={value} value={value}>{value}교시</option>
+            ))}
+          </select>
         </div>
 
         {/* Stats bar */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-9 gap-2">
           {[
             { label: '전체', value: records.length, color: 'text-gray-700', bg: 'bg-white' },
             { label: '출석', value: counts.present, color: 'text-green-700', bg: 'bg-green-50' },
             { label: '지각', value: counts.late,    color: 'text-amber-700', bg: 'bg-amber-50' },
             { label: '결석', value: counts.absent,  color: 'text-red-700',   bg: 'bg-red-50'   },
             { label: '조퇴', value: counts.early,   color: 'text-blue-700',  bg: 'bg-blue-50'  },
+            { label: '외출', value: counts.outing,  color: 'text-cyan-700',  bg: 'bg-cyan-50'  },
             { label: '공결', value: counts.excused, color: 'text-indigo-700', bg: 'bg-indigo-50' },
             { label: '병결', value: counts.sick,    color: 'text-rose-700', bg: 'bg-rose-50' },
+            { label: '미처리', value: counts.unset, color: 'text-gray-600', bg: 'bg-gray-50' },
           ].map(({ label, value, color, bg }) => (
             <div key={label} className={`${bg} rounded-xl border border-gray-200 px-3 py-2.5 text-center shadow-sm`}>
               <p className={`text-lg font-medium ${color}`}>{value}</p>
@@ -369,6 +375,7 @@ export function ManualAttendancePage() {
               { id: 'late', label: '지각' },
               { id: 'absent', label: '결석' },
               { id: 'early', label: '조퇴' },
+              { id: 'outing', label: '외출' },
               { id: 'excused', label: '공결' },
               { id: 'sick', label: '병결' },
             ] as { id: typeof statusFilter; label: string }[]).map(({ id, label }) => (
@@ -446,7 +453,7 @@ export function ManualAttendancePage() {
                   selected={selected.has(r.id)}
                   noteOpen={expandedNote === r.id}
                   onToggleSelect={() => toggleSelect(r.id)}
-                  onStatusChange={(s) => update(r.id, { status: s, time: currentTime })}
+                  onStatusChange={(s) => update(r.id, { status: s, time: currentTime, inherited: false })}
                   onTimeChange={(t) => update(r.id, { time: t })}
                   onNoteChange={(n) => update(r.id, { note: n })}
                   onToggleNote={() => setExpandedNote(expandedNote === r.id ? null : r.id)}
@@ -465,24 +472,33 @@ export function ManualAttendancePage() {
         </div>
 
         {/* Bottom save */}
-        <div className="flex items-center justify-between bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm">
           <div className="flex items-start gap-2">
             <AlertCircle size={13} className="text-gray-400 shrink-0 mt-0.5" />
             <p className="text-xs text-gray-400">
-              수동 처리 기록은 자동 GPS+QR 인증 기록과 구분되어 저장됩니다.
+              이전 교시 상태는 자동으로 이어지며, 이 교시에서 바꾸면 다음 교시에도 그대로 이어집니다.
             </p>
           </div>
-          <button
-            onClick={handleSave}
-            disabled={saving || processedCount === 0}
-            className="flex items-center gap-2 bg-gray-900 text-white rounded-xl px-5 py-2.5 text-sm hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ml-4"
-          >
-            {saving ? (
-              <><span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />저장 중...</>
-            ) : (
-              <><Save size={14} />출석 저장</>
-            )}
-          </button>
+          <div className="flex items-center justify-end gap-2 shrink-0">
+            <button
+              onClick={resetAll}
+              className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 rounded-xl px-4 py-2.5 text-sm hover:bg-gray-50 transition-colors"
+            >
+              <RotateCcw size={13} />
+              초기화
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving || records.length === 0}
+              className="flex items-center gap-2 bg-gray-900 text-white rounded-xl px-5 py-2.5 text-sm hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {saving ? (
+                <><span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />저장 중...</>
+              ) : (
+                <><Save size={14} />{period}교시 출석 저장</>
+              )}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -545,7 +561,10 @@ function StudentAttendanceRow({
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium text-gray-900 truncate">{r.name}</p>
-            <p className="text-xs text-gray-400">{r.class} · {r.number}번</p>
+            <p className="text-xs text-gray-400">
+              {r.class} · {r.number}번
+              {r.inherited && <span className="ml-1.5 text-cyan-600">이전 교시 유지</span>}
+            </p>
           </div>
         </div>
 
@@ -592,7 +611,10 @@ function StudentAttendanceRow({
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-gray-900">{r.name}</p>
-            <p className="text-xs text-gray-400">{r.class} · {r.number}번</p>
+            <p className="text-xs text-gray-400">
+              {r.class} · {r.number}번
+              {r.inherited && <span className="ml-1.5 text-cyan-600">이전 교시 유지</span>}
+            </p>
           </div>
           <StatusDropdown value={r.status} onChange={onStatusChange} />
         </div>

@@ -38,6 +38,7 @@ export async function initDb() {
     })
     await client.connect()
     database = client.db(DB_NAME)
+    await ensureAttendancePeriodSchema()
     ensureIndexesInBackground()
 
     return database
@@ -110,7 +111,7 @@ export async function ensureInitialData() {
       lateAfterTime: '09:10',
       closeTime: '17:00',
       autoAbsentEnabled: false,
-      statuses: ['present', 'late', 'absent', 'early_leave', 'excused', 'sick'],
+      statuses: ['present', 'late', 'absent', 'early_leave', 'outing', 'excused', 'sick'],
       updatedAt: now(),
     })
     await syncCounter('attendancePolicies')
@@ -142,16 +143,60 @@ function ensureIndexesInBackground() {
     col('qrSessions').createIndex({ id: 1 }, { unique: true }),
     col('qrSessions').createIndex({ tokenHash: 1 }, { unique: true }),
     col('attendanceRecords').createIndex({ id: 1 }, { unique: true }),
-    col('attendanceRecords').createIndex({ studentId: 1, classId: 1, date: 1 }, { unique: true }),
-    col('attendanceRecords').createIndex({ date: 1, classId: 1 }),
+    col('attendanceRecords').createIndex({ studentId: 1, classId: 1, date: 1, period: 1 }, { unique: true }),
+    col('attendanceRecords').createIndex({ date: 1, classId: 1, period: 1 }),
     col('attendancePolicies').createIndex({ id: 1 }, { unique: true }),
     col('classAttendancePolicies').createIndex({ classId: 1 }, { unique: true }),
-    col('attendanceClosures').createIndex({ date: 1, classId: 1 }, { unique: true }),
+    col('attendanceClosures').createIndex({ date: 1, classId: 1, period: 1 }, { unique: true }),
     col('rateLimits').createIndex({ key: 1 }, { unique: true }),
     col('rateLimits').createIndex({ resetAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 }),
   ]).catch((error) => {
     console.warn(`MongoDB index setup failed: ${error.message}`)
   })
+}
+
+async function ensureAttendancePeriodSchema() {
+  const version = await col('appMeta').findOne({ _id: 'attendancePeriodSchema' })
+  if (Number(version?.version || 0) >= 2) return
+
+  const attendance = col('attendanceRecords')
+  const indexes = await attendance.indexes()
+  for (const index of indexes) {
+    const keys = Object.keys(index.key || {})
+    if (index.unique && keys.join(',') === 'studentId,classId,date') {
+      await attendance.dropIndex(index.name)
+    }
+  }
+
+  await attendance.updateMany(
+    { period: { $exists: false } },
+    { $set: { period: 1 } },
+  )
+  await attendance.createIndex(
+    { studentId: 1, classId: 1, date: 1, period: 1 },
+    { unique: true },
+  )
+  const closures = col('attendanceClosures')
+  const closureIndexes = await closures.indexes()
+  for (const index of closureIndexes) {
+    const keys = Object.keys(index.key || {})
+    if (index.unique && keys.join(',') === 'date,classId') {
+      await closures.dropIndex(index.name)
+    }
+  }
+  await closures.updateMany(
+    { period: { $exists: false } },
+    { $set: { period: 1 } },
+  )
+  await closures.createIndex(
+    { date: 1, classId: 1, period: 1 },
+    { unique: true },
+  )
+  await col('appMeta').updateOne(
+    { _id: 'attendancePeriodSchema' },
+    { $set: { version: 2, updatedAt: now() } },
+    { upsert: true },
+  )
 }
 
 export async function nextId(name) {

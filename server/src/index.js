@@ -666,7 +666,8 @@ app.post('/api/qr-sessions', writeRateLimit, authRequired(['student']), route(as
   const latitude = requiredNumber(body, 'latitude', '위도', { min: -90, max: 90 })
   const longitude = requiredNumber(body, 'longitude', '경도', { min: -180, max: 180 })
   const accuracyMeters = optionalNumber(body, 'accuracyMeters', 'GPS 정확도', { min: 0, max: 10000 })
-  if (await isAttendanceClosed(today(), classId)) {
+  const period = optionalInteger(body, 'period', '교시', { defaultValue: 1, min: 1, max: 12 })
+  if (await isAttendanceClosed(today(), classId, period)) {
     return fail(res, 409, 'ATTENDANCE_CLOSED', '오늘 출석이 마감되어 QR 코드를 발급할 수 없습니다.')
   }
   if (await isPastAttendanceCloseTime({ classId })) {
@@ -681,6 +682,7 @@ app.post('/api/qr-sessions', writeRateLimit, authRequired(['student']), route(as
   const session = await insertDoc('qrSessions', {
     studentId: student.id,
     classId: Number(classId),
+    period,
     tokenHash: hashToken(token),
     latitude: latitude ?? null,
     longitude: longitude ?? null,
@@ -695,6 +697,7 @@ app.post('/api/qr-sessions', writeRateLimit, authRequired(['student']), route(as
     qrPayload: `attendi://attendance?token=${token}`,
     expiresAt,
     expiresInSeconds: QR_TTL_SECONDS,
+    period,
   })
 }))
 
@@ -713,14 +716,15 @@ app.post('/api/qr-sessions/verify', writeRateLimit, authRequired(['teacher', 'ad
 
   const verifiedAt = now()
   const date = verifiedAt.slice(0, 10)
-  if (await isAttendanceClosed(date, session.classId)) {
+  const period = optionalInteger(body, 'period', '교시', { defaultValue: Number(session.period || 1), min: 1, max: 12 })
+  if (await isAttendanceClosed(date, session.classId, period)) {
     return fail(res, 409, 'ATTENDANCE_CLOSED', '이미 마감된 출석입니다.')
   }
   if (await isPastAttendanceCloseTime({ classId: session.classId, at: verifiedAt })) {
     return fail(res, 409, 'ATTENDANCE_CLOSED', '출석 가능 시간이 지난 QR 코드입니다.')
   }
   const status = await getAttendanceStatus({ classId: session.classId, at: verifiedAt })
-  const existing = await col('attendanceRecords').findOne({ studentId: session.studentId, classId: session.classId, date })
+  const existing = await col('attendanceRecords').findOne({ studentId: session.studentId, classId: session.classId, date, period })
   if (existing) return fail(res, 409, 'DUPLICATE_ATTENDANCE', '이미 출석 처리된 학생입니다.')
 
   await col('qrSessions').updateOne({ id: session.id }, { $set: { usedAt: verifiedAt } })
@@ -728,6 +732,7 @@ app.post('/api/qr-sessions/verify', writeRateLimit, authRequired(['teacher', 'ad
     studentId: session.studentId,
     classId: session.classId,
     date,
+    period,
     status,
     memo: '',
     verifiedByQr: true,
@@ -738,13 +743,14 @@ app.post('/api/qr-sessions/verify', writeRateLimit, authRequired(['teacher', 'ad
   })
 
   const student = await getStudentById(session.studentId)
-  ok(res, { result: 'accepted', status: toClientStatus(status), verifiedAt, student })
+  ok(res, { result: 'accepted', status: toClientStatus(status), verifiedAt, period, student })
 }))
 
 app.get('/api/attendance/summary', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const date = String(req.query.date || today())
   const classId = req.query.classId ? Number(req.query.classId) : null
-  const filter = { date, ...(classId ? { classId } : {}) }
+  const period = req.query.period ? Number(req.query.period) : 1
+  const filter = { date, period, ...(classId ? { classId } : {}) }
   const [records, total, recentRecords] = await Promise.all([
     col('attendanceRecords').find(filter).toArray(),
     col('students').countDocuments({ isActive: true, ...(classId ? { classId } : {}) }),
@@ -754,23 +760,28 @@ app.get('/api/attendance/summary', authRequired(['teacher', 'admin']), route(asy
   const present = counts.present || 0
   const late = counts.late || 0
   const earlyLeave = counts.early_leave || 0
+  const outing = counts.outing || 0
   const excused = counts.excused || 0
   const sick = counts.sick || 0
   const explicitAbsent = counts.absent || 0
-  const unresolvedAbsent = Math.max(0, total - present - late - earlyLeave - excused - sick - explicitAbsent)
+  const explicitUnset = counts.unset || 0
+  const unprocessed = Math.max(0, total - present - late - earlyLeave - outing - excused - sick - explicitAbsent)
   const recentScans = await Promise.all(publicDocs(recentRecords).map(withRecentAttendanceNames))
 
   ok(res, {
     date,
     classId,
+    period,
     summary: {
       total,
       present,
       late,
-      absent: explicitAbsent + unresolvedAbsent,
+      absent: explicitAbsent,
       earlyLeave,
+      outing,
       excused,
       sick,
+      unprocessed: Math.max(unprocessed, explicitUnset),
     },
     recentScans: recentScans.map((row) => ({ ...row, status: toClientStatus(row.status) })),
   })
@@ -779,11 +790,13 @@ app.get('/api/attendance/summary', authRequired(['teacher', 'admin']), route(asy
 app.get('/api/attendance/weekly-summary', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const targetDate = String(req.query.date || today())
   const classId = req.query.classId ? Number(req.query.classId) : null
+  const period = req.query.period ? Number(req.query.period) : 1
   const days = getWeekDatesThrough(targetDate)
   const [total, records] = await Promise.all([
     col('students').countDocuments({ isActive: true, ...(classId ? { classId } : {}) }),
     col('attendanceRecords').find({
       date: { $gte: days[0], $lte: days[days.length - 1] },
+      period,
       ...(classId ? { classId } : {}),
     }).toArray(),
   ])
@@ -801,10 +814,12 @@ app.get('/api/attendance/weekly-summary', authRequired(['teacher', 'admin']), ro
       const present = counts.present || 0
       const late = counts.late || 0
       const earlyLeave = counts.early_leave || 0
+      const outing = counts.outing || 0
       const excused = counts.excused || 0
       const sick = counts.sick || 0
       const explicitAbsent = counts.absent || 0
-      const unresolvedAbsent = Math.max(0, total - present - late - earlyLeave - excused - sick - explicitAbsent)
+      const explicitUnset = counts.unset || 0
+      const unprocessed = Math.max(0, total - present - late - earlyLeave - outing - excused - sick - explicitAbsent)
       const attended = present + late + earlyLeave
       return {
         date,
@@ -813,9 +828,11 @@ app.get('/api/attendance/weekly-summary', authRequired(['teacher', 'admin']), ro
         present,
         late,
         earlyLeave,
+        outing,
         excused,
         sick,
-        absent: explicitAbsent + unresolvedAbsent,
+        absent: explicitAbsent,
+        unprocessed: Math.max(unprocessed, explicitUnset),
         attended,
         rate: total ? Math.round((attended / total) * 100) : 0,
       }
@@ -829,9 +846,10 @@ app.get('/api/attendance', authRequired(['teacher', 'admin']), route(async (req,
 
 app.get('/api/attendance/export.csv', authRequired(['teacher', 'admin']), route(async (req, res) => {
   const rows = await readAttendanceRows(req.query)
-  const header = ['date', 'className', 'studentNumber', 'studentName', 'status', 'verifiedByQr', 'verifiedAt', 'memo']
+  const header = ['date', 'period', 'className', 'studentNumber', 'studentName', 'status', 'verifiedByQr', 'verifiedAt', 'memo']
   const body = rows.map((row) => [
     row.date,
+    row.period || 1,
     row.className,
     row.studentNumber,
     row.studentName,
@@ -849,6 +867,7 @@ app.get('/api/attendance/export.csv', authRequired(['teacher', 'admin']), route(
 app.post('/api/attendance/close', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const selectedDate = dateKey(body.date || today())
+  const period = optionalInteger(body, 'period', '교시', { defaultValue: 1, min: 1, max: 12 })
   const classId = body.classId === undefined || body.classId === null || body.classId === ''
     ? null
     : optionalInteger(body, 'classId', '반 ID')
@@ -856,9 +875,9 @@ app.post('/api/attendance/close', writeRateLimit, authRequired(['teacher', 'admi
   const autoCreateAbsent = body.autoCreateAbsent === undefined
     ? Boolean(policy.autoAbsentEnabled)
     : optionalBoolean(body, 'autoCreateAbsent', Boolean(policy.autoAbsentEnabled))
-  const closure = await upsertAttendanceClosure({ date: selectedDate, classId, closedBy: req.user.id })
+  const closure = await upsertAttendanceClosure({ date: selectedDate, classId, period, closedBy: req.user.id })
   const createdAbsentCount = autoCreateAbsent
-    ? await createMissingAbsences({ date: selectedDate, classId })
+    ? await createMissingAbsences({ date: selectedDate, classId, period })
     : 0
   ok(res, { closure, createdAbsentCount })
 }))
@@ -866,15 +885,17 @@ app.post('/api/attendance/close', writeRateLimit, authRequired(['teacher', 'admi
 app.post('/api/attendance/reopen', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const selectedDate = dateKey(body.date || today())
+  const period = optionalInteger(body, 'period', '교시', { defaultValue: 1, min: 1, max: 12 })
   const classId = body.classId === undefined || body.classId === null || body.classId === ''
     ? null
     : optionalInteger(body, 'classId', '반 ID')
-  ok(res, await deleteAttendanceClosure({ date: selectedDate, classId }))
+  ok(res, await deleteAttendanceClosure({ date: selectedDate, classId, period }))
 }))
 
 app.post('/api/attendance/manual', writeRateLimit, authRequired(['teacher', 'admin']), route(async (req, res) => {
   const body = assertObject(req.body)
   const selectedDate = body.date ? dateKey(body.date) : today()
+  const period = optionalInteger(body, 'period', '교시', { defaultValue: 1, min: 1, max: 12 })
   const input = Array.isArray(body.records) ? body.records : [body]
   const saved = []
 
@@ -883,13 +904,13 @@ app.post('/api/attendance/manual', writeRateLimit, authRequired(['teacher', 'adm
     if (!item.studentId || !item.status) continue
     const student = await getStudentById(item.studentId)
     if (!student) continue
-    if (await isAttendanceClosed(selectedDate, student.classId)) {
+    if (await isAttendanceClosed(selectedDate, student.classId, period)) {
       return fail(res, 409, 'ATTENDANCE_CLOSED', '이미 마감된 날짜 또는 반입니다.')
     }
-    const status = toDbStatus(enumValue(String(item.status), ['present', 'late', 'absent', 'early', 'early_leave', 'excused', 'sick'], 'status', '출석 상태'))
-    const verifiedAt = status === 'absent' ? null : toIsoAtDateTime(selectedDate, item.time)
+    const status = toDbStatus(enumValue(String(item.status), ['present', 'late', 'absent', 'early', 'early_leave', 'outing', 'excused', 'sick', 'unset'], 'status', '출석 상태'))
+    const verifiedAt = ['absent', 'unset'].includes(status) ? null : toIsoAtDateTime(selectedDate, item.time)
     const updatedAt = now()
-    const filter = { studentId: student.id, classId: student.classId, date: selectedDate }
+    const filter = { studentId: student.id, classId: student.classId, date: selectedDate, period }
     const existing = await col('attendanceRecords').findOne(filter)
     const data = {
       ...filter,
@@ -904,10 +925,10 @@ app.post('/api/attendance/manual', writeRateLimit, authRequired(['teacher', 'adm
     } else {
       await insertDoc('attendanceRecords', data)
     }
-    saved.push({ studentId: student.id, status: toClientStatus(status) })
+    saved.push({ studentId: student.id, status: toClientStatus(status), period })
   }
 
-  ok(res, { savedCount: saved.length, records: saved })
+  ok(res, { savedCount: saved.length, period, records: saved })
 }))
 
 app.get('/api/device-tokens', authRequired(['teacher', 'admin']), route(async (_req, res) => {
@@ -1243,12 +1264,12 @@ function duplicateMessage(error, fallback) {
   return isDuplicate(error) ? '중복된 값' : fallback
 }
 
-async function createMissingAbsences({ date, classId }) {
+async function createMissingAbsences({ date, classId, period = 1 }) {
   const studentFilter = { isActive: true, ...(classId ? { classId: Number(classId) } : {}) }
   const students = await col('students').find(studentFilter, { projection: { _id: 0 } }).toArray()
   let created = 0
   for (const student of students) {
-    const filter = { studentId: student.id, classId: student.classId, date }
+    const filter = { studentId: student.id, classId: student.classId, date, period: Number(period) }
     const existing = await col('attendanceRecords').findOne(filter)
     if (existing) continue
     try {
