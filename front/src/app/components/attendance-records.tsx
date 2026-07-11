@@ -114,7 +114,6 @@ export function AttendanceRecordsPage() {
   const [students, setStudents] = useState<ApiStudent[]>([])
   const [rows, setRows] = useState<ApiAttendanceRow[]>([])
   const [date, setDate] = useState(todayString())
-  const [focusPeriod, setFocusPeriod] = useState(1)
   const [classFilter, setClassFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState<AttendanceStatus | 'all'>('all')
   const [search, setSearch] = useState('')
@@ -148,15 +147,15 @@ export function AttendanceRecordsPage() {
   }, [classFilter, classOptions])
 
   const classStudents = students.filter((student) => classFilter === 'all' || String(student.classId) === classFilter)
-  const counts = PERIODS.length ? classStudents.reduce<Record<AttendanceStatus, number>>((result, student) => {
-    result[getCell(rows, student.id, focusPeriod).status] += 1
+  const counts = classStudents.reduce<Record<AttendanceStatus, number>>((result, student) => {
+    for (const period of PERIODS) result[getCell(rows, student.id, period).status] += 1
     return result
-  }, { present: 0, late: 0, absent: 0, early: 0, result: 0, unset: 0 }) : { present: 0, late: 0, absent: 0, early: 0, result: 0, unset: 0 }
+  }, { present: 0, late: 0, absent: 0, early: 0, result: 0, unset: 0 })
 
   const filteredStudents = classStudents.filter((student) => {
     const query = search.trim().toLowerCase()
-    const status = getCell(rows, student.id, focusPeriod).status
-    return (statusFilter === 'all' || status === statusFilter)
+    const hasStatus = PERIODS.some((period) => getCell(rows, student.id, period).status === statusFilter)
+    return (statusFilter === 'all' || hasStatus)
       && (!query || student.name.toLowerCase().includes(query) || student.studentNumber.toLowerCase().includes(query))
   })
 
@@ -211,9 +210,6 @@ export function AttendanceRecordsPage() {
             <option value="all">전체 반</option>
             {classOptions.map((option) => <option key={option.id} value={option.id}>{classShort(option.name)}</option>)}
           </select>
-          <select value={focusPeriod} onChange={(event) => setFocusPeriod(Number(event.target.value))} className="min-w-28 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm outline-none" title="상태 집계 기준 교시">
-            {PERIODS.map((period) => <option key={period} value={period}>{period}교시 집계</option>)}
-          </select>
           <label className="relative flex-1 sm:max-w-xs">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="이름, 학번 검색..." className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-9 pr-3 text-sm outline-none shadow-sm" />
@@ -234,7 +230,7 @@ export function AttendanceRecordsPage() {
             <div className="min-w-[1140px]">
               <div className="grid grid-cols-[220px_repeat(8,minmax(112px,1fr))] border-b border-gray-200 bg-gray-50 text-xs font-medium text-gray-500">
                 <div className="sticky left-0 z-20 border-r border-gray-200 bg-gray-50 px-4 py-3">학생</div>
-                {PERIODS.map((period) => <div key={period} className={`border-r border-gray-100 px-2 py-3 text-center last:border-r-0 ${period === focusPeriod ? 'bg-gray-100 text-gray-900' : ''}`}>{period}교시</div>)}
+                {PERIODS.map((period) => <div key={period} className="border-r border-gray-100 px-2 py-3 text-center last:border-r-0">{period}교시</div>)}
               </div>
               {filteredStudents.length === 0 ? (
                 <div className="py-16 text-center text-sm text-gray-400">해당 조건의 학생이 없습니다.</div>
@@ -247,7 +243,7 @@ export function AttendanceRecordsPage() {
                       <p className="text-xs text-gray-400">{classShort(student.className)} · {displayNumber(student.studentNumber)}번</p>
                     </div>
                   </div>
-                  {PERIODS.map((period) => <RecordCell key={period} value={getCell(rows, student.id, period)} focused={period === focusPeriod} />)}
+                  {PERIODS.map((period) => <RecordCell key={period} value={getCell(rows, student.id, period)} />)}
                 </div>
               ))}
             </div>
@@ -262,11 +258,11 @@ export function AttendanceRecordsPage() {
   )
 }
 
-function RecordCell({ value, focused }: { value: AttendanceCellValue; focused: boolean }) {
+function RecordCell({ value }: { value: AttendanceCellValue }) {
   const config = STATUS_CONFIG[value.status]
   const details = [value.reasonCategory ? REASON_LABEL[value.reasonCategory] : '', value.note].filter(Boolean).join(' · ')
   return (
-    <div className={`min-h-24 border-r border-gray-100 p-2 last:border-r-0 ${focused ? 'bg-gray-50' : ''}`}>
+    <div className="min-h-24 border-r border-gray-100 p-2 last:border-r-0">
       <div className={`flex items-center justify-center gap-1 rounded-md border px-2 py-2 text-xs font-medium ${config.style} ${value.inherited ? 'border-dashed' : ''}`}>
         {config.icon} {config.label}
       </div>
