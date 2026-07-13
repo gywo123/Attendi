@@ -87,10 +87,37 @@ function isAuthPayload(value: unknown): value is AuthPayload {
   )
 }
 
+function dateStringInSeoul(value = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value)
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || ''
+  return `${get('year')}-${get('month')}-${get('day')}`
+}
+
+function normalizeAttendanceRequestPath(path: string) {
+  if (!path.startsWith('/attendance/summary?') && !path.startsWith('/attendance/weekly-summary?')) return path
+
+  const [pathname, query = ''] = path.split('?', 2)
+  const params = new URLSearchParams(query)
+  const utcToday = new Date().toISOString().slice(0, 10)
+  const seoulToday = dateStringInSeoul()
+
+  if (params.get('date') === utcToday && utcToday !== seoulToday) {
+    params.set('date', seoulToday)
+  }
+
+  return `${pathname}?${params.toString()}`
+}
+
 export async function apiFetch<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  const normalizedPath = normalizeAttendanceRequestPath(path)
   const method = String(options.method || 'GET').toUpperCase()
   const isGet = method === 'GET'
-  const cacheKey = `${API_BASE_URL}${path}`
+  const cacheKey = `${API_BASE_URL}${normalizedPath}`
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_GET_CACHE_TTL_MS
   const cached = getCache.get(cacheKey)
 
@@ -106,7 +133,7 @@ export async function apiFetch<T>(path: string, options: ApiRequestOptions = {})
 
   if (!isGet) clearApiCache()
 
-  const request = fetch(`${API_BASE_URL}${path}`, { ...options, headers, credentials: 'include' })
+  const request = fetch(`${API_BASE_URL}${normalizedPath}`, { ...options, headers, credentials: 'include' })
     .then(async (response) => {
       const payload = await response.json() as ApiResponse<T>
       if (!payload.success) {
